@@ -220,7 +220,7 @@ def webhook_inbound():
 # -------- Inbox UI (WhatsApp theme + Tabs + Scrollable) --------
 INBOX_HTML = """
 <!doctype html><html lang="en"><meta charset="utf-8">
-<title>WhatsApp API Inbox - Al-Khawarizmi Group </title><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WhatsApp API Inbox - By Elite Dev. </title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
  :root{
    --wa-green:#25D366;
@@ -266,7 +266,7 @@ INBOX_HTML = """
 </style>
 
 <div class="topbar">
-  <div class="pill">WhatsApp Inbox</div>
+  <div class="pill">WhatsApp API Inbox - Al-Khawarizmi Group</div>
 </div>
 
 <div class="wrap">
