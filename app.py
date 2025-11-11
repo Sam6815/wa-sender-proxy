@@ -217,10 +217,10 @@ def webhook_inbound():
 
     return jsonify(status="ok"), 200
 
-# -------- Inbox UI (WhatsApp-ish theme + Tabs + Scrollable) --------
+# -------- Inbox UI (WhatsApp theme + Tabs + Scrollable) --------
 INBOX_HTML = """
 <!doctype html><html lang="en"><meta charset="utf-8">
-<title>WhatsApp Inbox</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WhatsApp API Inbox - Al-Khawarizmi Group </title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
  :root{
    --wa-green:#25D366;
