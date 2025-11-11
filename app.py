@@ -1,6 +1,9 @@
-import os, json, sqlite3, datetime
+import os, json, sqlite3, datetime, base64, csv, io
 from pathlib import Path
-from flask import Flask, request, jsonify, render_template_string, send_from_directory, redirect, url_for
+from flask import (
+    Flask, request, jsonify, render_template_string,
+    send_from_directory, redirect, url_for, Response, abort
+)
 import requests
 
 # -------- Config (env) --------
@@ -8,6 +11,11 @@ VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "dev-verify")
 WA_PNID      = os.getenv("WA_PNID")      # e.g. 886670621191094
 WA_TOKEN     = os.getenv("WA_TOKEN")     # long-lived system user token
 GRAPH_BASE   = "https://graph.facebook.com/v21.0"
+
+# Minimal auth (HTTP Basic). If INBOX_PASS is unset -> auth disabled.
+INBOX_USER = os.getenv("INBOX_USER", "admin")
+INBOX_PASS = os.getenv("INBOX_PASS")  # set to enable
+PROTECT_MEDIA = os.getenv("PROTECT_MEDIA", "0") == "1"  # optional
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"
@@ -58,6 +66,29 @@ def fetch_messages(limit=200, direction=None):
 
 init_db()
 
+# -------- Minimal HTTP Basic auth --------
+def _unauth():
+    return Response("Auth required", 401, {"WWW-Authenticate": 'Basic realm="Inbox"'})
+
+def require_basic_auth(fn):
+    if not INBOX_PASS:
+        # Auth disabled
+        return fn
+    def _wrap(*args, **kwargs):
+        auth = request.headers.get("Authorization", "")
+        if auth.startswith("Basic "):
+            try:
+                raw = base64.b64decode(auth.split(" ", 1)[1]).decode("utf-8")
+                user, pw = raw.split(":", 1)
+                if user == INBOX_USER and pw == INBOX_PASS:
+                    return fn(*args, **kwargs)
+            except Exception:
+                pass
+        return _unauth()
+    # Preserve endpoint name
+    _wrap.__name__ = fn.__name__
+    return _wrap
+
 # -------- Helpers --------
 def graph_post(path, payload):
     if not WA_PNID or not WA_TOKEN:
@@ -82,6 +113,22 @@ def graph_get(path):
         raise RuntimeError(f"GET {url} -> {r.status_code} {r.text}")
     return r.json()
 
+def badge_class(status_text: str) -> str:
+    """
+    Map a status to a CSS class (color).
+    WhatsApp statuses we might see: sent, delivered, read, failed
+    """
+    s = (status_text or "").lower()
+    if s == "read":
+        return "badge green"
+    if s == "delivered":
+        return "badge teal"
+    if s == "sent":
+        return "badge blue"
+    if s in {"failed", "error"}:
+        return "badge red"
+    return "badge gray"
+
 def _massage_messages(rows, base_url):
     """Enrich rows with media_link and a clean preview. Supports:
        A) {"image": {"id":"...","caption":"..."}}
@@ -93,6 +140,7 @@ def _massage_messages(rows, base_url):
         m = dict(m)
         m["preview"] = m.get("body") or ""
         m["media_link"] = None
+        m["status_class"] = badge_class(m.get("status"))
         t = (m.get("type") or "").lower()
 
         if t in {"image","audio","video","document","sticker"} and m.get("body"):
@@ -217,10 +265,10 @@ def webhook_inbound():
 
     return jsonify(status="ok"), 200
 
-# -------- Inbox UI (WhatsApp theme + Tabs + Scrollable) --------
+# -------- UI (WhatsApp theme + Tabs + Scrollable + Status badges + Quick actions) --------
 INBOX_HTML = """
 <!doctype html><html lang="en"><meta charset="utf-8">
-<title>WhatsApp API Inbox - By Elite Dev. </title><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>WhatsApp API Inbox - By Elite Dev.</title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
  :root{
    --wa-green:#25D366;
@@ -228,12 +276,13 @@ INBOX_HTML = """
    --wa-light:#DCF8C6;
    --wa-bg:#f6f7f9;
    --text:#0f172a;
+   --blue:#3b82f6; --teal:#14b8a6; --green:#22c55e; --red:#ef4444; --gray:#64748b;
  }
  body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--wa-bg);color:var(--text)}
  .wrap{max-width:1200px;margin:0 auto;padding:20px}
  .card{background:#fff;border-radius:12px;box-shadow:0 10px 24px rgba(0,0,0,.06);overflow:hidden;border:1px solid #eef2f7}
 
- .topbar{background:var(--wa-dark);color:#fff;padding:14px 18px;display:flex;align-items:center;gap:12px}
+ .topbar{background:var(--wa-dark);color:#fff;padding:14px 18px;display:flex;align-items:center;gap:12px;justify-content:space-between}
  .pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;
        background:#fff1; color:#fff; font-weight:600; letter-spacing:.2px}
 
@@ -241,12 +290,12 @@ INBOX_HTML = """
  .tab{padding:8px 14px;border-radius:10px;border:1px solid #e5e7eb;color:#334155;text-decoration:none}
  .tab.active{background:var(--wa-green);color:#fff;border-color:var(--wa-green)}
  .tab:hover{border-color:#cbd5e1}
+ .righttools a{margin-left:10px;color:#334155;text-decoration:none}
+ .righttools a:hover{color:#000}
 
  .compose{padding:16px;display:flex;flex-direction:column;gap:10px;background:#fff}
  .row{display:flex;gap:8px;flex-wrap:wrap}
- input,select,textarea,button{
-   padding:.6rem .7rem;font:inherit;border:1px solid #d1d5db;border-radius:10px;outline:none
- }
+ input,select,textarea,button{padding:.6rem .7rem;font:inherit;border:1px solid #d1d5db;border-radius:10px;outline:none}
  input:focus,select:focus,textarea:focus{border-color:var(--wa-green);box-shadow:0 0 0 3px rgba(37,211,102,.18)}
  button{background:var(--wa-green);color:#fff;border:1px solid var(--wa-green);cursor:pointer}
  button:hover{filter:brightness(.95)}
@@ -256,17 +305,23 @@ INBOX_HTML = """
  table{border-collapse:collapse;width:100%}
  th,td{border-bottom:1px solid #eef2f7;padding:10px 8px;text-align:left;vertical-align:top}
  thead th{position:sticky;top:0;background:#fff}
- .badge{display:inline-block;padding:.12rem .5rem;border-radius:999px;background:var(--wa-light);border:1px solid #c9eec2}
+ .badge{display:inline-block;padding:.12rem .5rem;border-radius:999px;border:1px solid #c9eec2;background:var(--wa-light)}
+ .badge.blue{background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8}
+ .badge.teal{background:#f0fdfa;border-color:#99f6e4;color:#0f766e}
+ .badge.green{background:#ecfdf5;border-color:#a7f3d0;color:#065f46}
+ .badge.red{background:#fef2f2;border-color:#fecaca;color:#991b1b}
+ .badge.gray{background:#f1f5f9;border-color:#cbd5e1;color:#334155}
  .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
 
- /* Toast */
- #toast{position:fixed;right:16px;bottom:16px;z-index:9999;display:none;
-        background:#16a34a;color:#fff;padding:.6rem .8rem;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,.2)}
- #toast.error{background:#dc2626}
+ .qa a{display:inline-block;margin-right:8px;padding:.25rem .55rem;border-radius:8px;border:1px solid #e2e8f0;text-decoration:none;color:#0f172a;font-size:.9rem}
+ .qa a:hover{background:#f8fafc}
 </style>
 
 <div class="topbar">
   <div class="pill">WhatsApp API Inbox - Al-Khawarizmi Group</div>
+  <div class="righttools">
+    <a href="/export.csv?dir={{active_dir}}" title="Export CSV">Export CSV</a>
+  </div>
 </div>
 
 <div class="wrap">
@@ -297,7 +352,7 @@ INBOX_HTML = """
         <thead>
           <tr>
             <th>When</th><th>Dir</th><th>From</th><th>To</th><th>Name</th>
-            <th>Type</th><th>Status</th><th>Body / Media</th>
+            <th>Type</th><th>Status</th><th>Body / Media</th><th>Quick</th>
           </tr>
         </thead>
         <tbody>
@@ -309,13 +364,21 @@ INBOX_HTML = """
             <td>{{m.wa_to or ""}}</td>
             <td>{{m.name or ""}}</td>
             <td>{{m.type}}</td>
-            <td>{{m.status or ""}}</td>
-            <td class="mono" style="max-width:640px;white-space:pre-wrap">
+            <td><span class="{{m.status_class}}">{{m.status or "—"}}</span></td>
+            <td class="mono" style="max-width:520px;white-space:pre-wrap">
               {% if m.media_link %}
                 <a href="{{m.media_link}}" target="_blank" rel="noopener">Download {{m.type}}</a>
                 <div style="opacity:.75">{{m.preview}}</div>
               {% else %}
                 {{m.preview}}
+              {% endif %}
+            </td>
+            <td class="qa">
+              {% if m.direction == 'in' and m.wa_from %}
+                <a href="/quick?to={{m.wa_from}}&msg=%F0%9F%91%8D&redir={{active_dir}}">👍</a>
+                <a href="/quick?to={{m.wa_from}}&msg=We%E2%80%99ll%20get%20back%20shortly.&redir={{active_dir}}">Ack</a>
+              {% elif m.direction == 'out' and m.wa_to %}
+                <a href="/quick?to={{m.wa_to}}&msg=Resending%20this.&redir={{active_dir}}">Resend</a>
               {% endif %}
             </td>
           </tr>
@@ -328,15 +391,22 @@ INBOX_HTML = """
 
 <script>
 (function(){
-  // Toast from URL params
   const params = new URLSearchParams(location.search);
   const ok = params.get('sent');
   const err = params.get('err');
   const toast = document.getElementById('toast');
   function show(msg, isErr){
     toast.textContent = msg;
-    toast.className = isErr ? 'error' : '';
-    toast.style.display = 'block';
+    toast.style.position='fixed';
+    toast.style.right='16px';
+    toast.style.bottom='16px';
+    toast.style.zIndex='9999';
+    toast.style.display='block';
+    toast.style.background = isErr ? '#dc2626' : '#16a34a';
+    toast.style.color='#fff';
+    toast.style.padding='.6rem .8rem';
+    toast.style.borderRadius='10px';
+    toast.style.boxShadow='0 6px 18px rgba(0,0,0,.2)';
     setTimeout(()=>{ toast.style.display='none'; }, 2200);
   }
   if(ok==='1'){ show('Message sent ✓', false); }
@@ -348,6 +418,7 @@ INBOX_HTML = """
 
 # ---- Routes for Inbox UI (with dir tabs) ----
 @app.get("/inbox")
+@require_basic_auth
 def inbox():
     active_dir = request.args.get("dir") or "in"
     if active_dir not in {"in","out"}:
@@ -357,6 +428,7 @@ def inbox():
     return render_template_string(INBOX_HTML, messages=rows, active_dir=active_dir)
 
 @app.post("/inbox/send")
+@require_basic_auth
 def inbox_send():
     to = request.form.get("to")
     kind = request.form.get("kind", "text")
@@ -377,6 +449,19 @@ def inbox_send():
         return redirect(url_for('inbox', dir='out', sent='1'))
     except Exception as e:
         return redirect(url_for('inbox', dir='out', err=str(e)))
+
+# ---- Quick actions (send a short text to ?to=) ----
+@app.get("/quick")
+@require_basic_auth
+def quick():
+    to = request.args.get("to")
+    msg = request.args.get("msg", "👍")
+    redir = request.args.get("redir", "in")
+    try:
+        do_send(to, kind="text", text=msg)
+        return redirect(url_for('inbox', dir=redir, sent='1'))
+    except Exception as e:
+        return redirect(url_for('inbox', dir=redir, err=str(e)))
 
 # -------- Privacy (optional) --------
 @app.get("/privacy")
@@ -408,7 +493,12 @@ def send_api():
 # -------- Media download --------
 @app.get("/wa/media/<media_id>")
 def wa_media(media_id):
-    meta = graph_get(media_id)
+    if PROTECT_MEDIA and INBOX_PASS:
+        # Require auth if protection toggled on
+        res = require_basic_auth(lambda: None)()
+        if isinstance(res, Response) and res.status_code == 401:
+            return res
+    meta = graph_get(media_id)    # -> {"url": "..."}
     url = meta.get("url")
     if not url:
         return jsonify(error="no url for media"), 404
@@ -417,6 +507,31 @@ def wa_media(media_id):
         return (r.text, r.status_code, {"Content-Type": "application/json"})
     ctype = r.headers.get("Content-Type", "application/octet-stream")
     return (r.content, 200, {"Content-Type": ctype})
+
+# -------- CSV export --------
+@app.get("/export.csv")
+@require_basic_auth
+def export_csv():
+    direction = request.args.get("dir")
+    if direction not in {"in","out"}:
+        direction = None
+    rows = fetch_messages(2000, direction=direction)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["created_at","direction","wa_from","wa_to","wa_id","name","type","status","conversation_id","conversation_category","body"])
+    for m in rows:
+        writer.writerow([
+            m.get("created_at"), m.get("direction"), m.get("wa_from"), m.get("wa_to"),
+            m.get("wa_id"), m.get("name"), m.get("type"), m.get("status"),
+            m.get("conversation_id"), m.get("conversation_category"),
+            (m.get("body") or "").replace("\n"," ").replace("\r"," ")
+        ])
+    buf.seek(0)
+    return Response(
+        buf.read(),
+        mimetype="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="messages_{direction or "all"}.csv"'}
+    )
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
