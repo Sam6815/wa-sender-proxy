@@ -45,9 +45,6 @@ def store_message(**kw):
         c.commit()
 
 def fetch_messages(limit=200, direction=None):
-    """
-    Fetch last N messages. If direction in {'in','out'} is provided, filter in SQL.
-    """
     with sqlite3.connect(DB_PATH) as c:
         c.row_factory = sqlite3.Row
         if direction in {"in","out"}:
@@ -86,10 +83,9 @@ def graph_get(path):
     return r.json()
 
 def _massage_messages(rows, base_url):
-    """Enrich rows with media_link (when possible) and a clean preview.
-       Supports both shapes:
-       A) {"image": {"id": "...", "caption": "..."}}
-       B) {"id": "...", "mime_type": "...", "caption": "..."} (inner object stored)
+    """Enrich rows with media_link and a clean preview. Supports:
+       A) {"image": {"id":"...","caption":"..."}}
+       B) {"id":"...","mime_type":"...","caption":"..."} (inner object stored)
     """
     out = []
     base = (base_url or "").rstrip("/")
@@ -120,7 +116,7 @@ def _massage_messages(rows, base_url):
         out.append(m)
     return out
 
-# Core send logic (used by both /send API and /inbox/send form)
+# Core send logic
 def do_send(to, kind="text", text="", template=None):
     if not to:
         raise RuntimeError("missing 'to'")
@@ -221,57 +217,15 @@ def webhook_inbound():
 
     return jsonify(status="ok"), 200
 
-# -------- Send API --------
-@app.post("/send")
-def send_api():
-    """
-    JSON:
-    {
-      "to": "+9617xxxxxx",
-      "kind": "text" | "template",
-      "text": "Hi",                      # when kind=text
-      "template": {                      # when kind=template
-        "name": "hello_world1",
-        "language": "en",
-        "components": [ ... ]            # optional
-      }
-    }
-    """
-    p = request.get_json(force=True, silent=False)
-    to = p.get("to"); kind = p.get("kind","text")
-    try:
-        if kind == "text":
-            resp = do_send(to, kind="text", text=p.get("text",""))
-        else:
-            resp = do_send(to, kind="template", template=p.get("template") or {})
-        return jsonify(resp), 200
-    except Exception as e:
-        return jsonify(error=str(e)), 400
-
-# -------- Media download (works on Render) --------
-@app.get("/wa/media/<media_id>")
-def wa_media(media_id):
-    # Step 1: resolve the media URL
-    meta = graph_get(media_id)    # -> {"url": "..."}
-    url = meta.get("url")
-    if not url:
-        return jsonify(error="no url for media"), 404
-    # Step 2: download bytes from lookaside
-    r = requests.get(url, headers={"Authorization": f"Bearer {WA_TOKEN}"}, timeout=25)
-    if not r.ok:
-        return (r.text, r.status_code, {"Content-Type": "application/json"})
-    ctype = r.headers.get("Content-Type", "application/octet-stream")
-    return (r.content, 200, {"Content-Type": ctype})
-
 # -------- Inbox UI (WhatsApp-ish theme + Tabs + Scrollable) --------
 INBOX_HTML = """
 <!doctype html><html lang="en"><meta charset="utf-8">
 <title>WhatsApp Inbox</title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
  :root{
-   --wa-green:#25D366;       /* WhatsApp green */
-   --wa-dark:#075E54;        /* WhatsApp dark header */
-   --wa-light:#DCF8C6;       /* WhatsApp light bubble */
+   --wa-green:#25D366;
+   --wa-dark:#075E54;
+   --wa-light:#DCF8C6;
    --wa-bg:#f6f7f9;
    --text:#0f172a;
  }
@@ -395,7 +349,7 @@ INBOX_HTML = """
 # ---- Routes for Inbox UI (with dir tabs) ----
 @app.get("/inbox")
 def inbox():
-    active_dir = request.args.get("dir") or "in"  # default to Inbox
+    active_dir = request.args.get("dir") or "in"
     if active_dir not in {"in","out"}:
         active_dir = "in"
     base = request.url_root
@@ -420,7 +374,6 @@ def inbox_send():
             tpl = {"name": tpl_name, "language": tpl_lang}
             if comps: tpl["components"] = comps
             do_send(to, kind="template", template=tpl)
-        # Redirect to Sent tab with success toast
         return redirect(url_for('inbox', dir='out', sent='1'))
     except Exception as e:
         return redirect(url_for('inbox', dir='out', err=str(e)))
@@ -455,7 +408,7 @@ def send_api():
 # -------- Media download --------
 @app.get("/wa/media/<media_id>")
 def wa_media(media_id):
-    meta = graph_get(media_id)    # -> {"url": "..."}
+    meta = graph_get(media_id)
     url = meta.get("url")
     if not url:
         return jsonify(error="no url for media"), 404
@@ -466,5 +419,4 @@ def wa_media(media_id):
     return (r.content, 200, {"Content-Type": ctype})
 
 if __name__ == "__main__":
-    # For local dev; Render uses Gunicorn (Procfile)
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
