@@ -1,10 +1,24 @@
-import os, json, sqlite3, datetime, base64, csv, io
+import os, json, sqlite3, base64, csv, io
 from pathlib import Path
 from flask import (
     Flask, request, jsonify, render_template_string,
     send_from_directory, redirect, url_for, Response
 )
 import requests
+
+# --- Timezone formatting (GMT+2 with AM/PM) ---
+from datetime import datetime, timezone, timedelta
+TZ_GMT2 = timezone(timedelta(hours=2))
+
+def fmt_gmt2(iso_str: str) -> str:
+    try:
+        dt = datetime.fromisoformat(iso_str)  # stored as naive UTC ISO
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        dt2 = dt.astimezone(TZ_GMT2)
+        return dt2.strftime("%Y-%m-%d %I:%M %p GMT+2")
+    except Exception:
+        return iso_str or ""
 
 # -------- Config (env) --------
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "dev-verify")
@@ -44,7 +58,8 @@ def init_db():
 def store_message(**kw):
     fields = ("created_at","direction","wa_from","wa_to","wa_id","name",
               "type","body","status","conversation_id","conversation_category")
-    values = [kw.get("created_at") or datetime.datetime.utcnow().isoformat()] + [kw.get(f) for f in fields[1:]]
+    # store as UTC naive ISO for consistency
+    values = [kw.get("created_at") or datetime.utcnow().isoformat()] + [kw.get(f) for f in fields[1:]]
     with sqlite3.connect(DB_PATH) as c:
         c.execute(f"INSERT INTO messages ({','.join(fields)}) VALUES ({','.join(['?']*len(fields))})", values)
         c.commit()
@@ -129,6 +144,8 @@ def _massage_messages(rows, base_url):
     base = (base_url or "").rstrip("/")
     for m in rows:
         m = dict(m)
+        # formatted display time
+        m["created_fmt"] = fmt_gmt2(m.get("created_at", ""))
         m["preview"] = m.get("body") or ""
         m["media_link"] = None
         m["status_class"] = badge_class(m.get("status"))
@@ -195,6 +212,7 @@ def webhook_inbound():
         for entry in (data.get("entry") or []):
             for ch in (entry.get("changes") or []):
                 value = ch.get("value") or {}
+                # Status updates
                 for st in (value.get("statuses") or []):
                     conv = st.get("conversation") or {}
                     store_message(
@@ -203,6 +221,7 @@ def webhook_inbound():
                         body=json.dumps(st, ensure_ascii=False), status=st.get("status"),
                         conversation_id=conv.get("id"), conversation_category=conv.get("category"),
                     )
+                # Inbound messages
                 contacts = value.get("contacts") or [{}]
                 profile_name = (contacts[0].get("profile") or {}).get("name") if contacts else None
                 meta = value.get("metadata") or {}
@@ -303,7 +322,7 @@ INBOX_HTML = """
         <tbody id="tbody">
         {% for m in messages %}
           <tr data-id="{{m.id}}">
-            <td>{{m.created_at}}</td>
+            <td>{{m.created_fmt}}</td>
             <td><span class="badge">{{m.direction}}</span></td>
             <td>{{m.wa_from or ""}}</td>
             <td>{{m.wa_to or ""}}</td>
@@ -360,11 +379,11 @@ INBOX_HTML = """
       if(!res.ok) return;
       const items = await res.json(); // newest first
       if(items.length){
-        for(const m of items){ // prepend in reverse so latest ends up at top
+        for(const m of items){
           const tr = document.createElement('tr');
           tr.setAttribute('data-id', m.id);
           tr.innerHTML = `
-            <td>${m.created_at}</td>
+            <td>${m.created_fmt || m.created_at || ''}</td>
             <td><span class="badge">${m.direction||''}</span></td>
             <td>${m.wa_from||''}</td>
             <td>${m.wa_to||''}</td>
@@ -471,7 +490,6 @@ def send_api():
 @app.get("/wa/media/<media_id>")
 def wa_media(media_id):
     if PROTECT_MEDIA and INBOX_PASS:
-        # simple gate when protection is toggled on
         wrapped = require_basic_auth(lambda: Response("ok",200))()
         if isinstance(wrapped, Response) and wrapped.status_code == 401:
             return wrapped
@@ -495,10 +513,10 @@ def export_csv():
     writer.writerow(["id","created_at","direction","wa_from","wa_to","wa_id","name","type","status","conversation_id","conversation_category","body"])
     for m in rows:
         writer.writerow([
-            m.get("id"), m.get("created_at"), m.get("direction"), m.get("wa_from"), m.get("wa_to"),
+            m.get("id"), fmt_gmt2(m.get("created_at","")), m.get("direction"), m.get("wa_from"), m.get("wa_to"),
             m.get("wa_id"), m.get("name"), m.get("type"), m.get("status"),
             m.get("conversation_id"), m.get("conversation_category"),
-            (m.get("body") or "").replace("\n"," ").replace("\r"," ")
+            (m.get("body") or "").replace("\\n"," ").replace("\\r"," ")
         ])
     buf.seek(0)
     return Response(
@@ -516,7 +534,6 @@ def api_messages():
     since_id = request.args.get("since_id")
     base = request.url_root
     rows = _massage_messages(fetch_messages(200, direction=direction, since_id=since_id), base)
-    # Return newest-first (already sorted DESC)
     return jsonify(rows)
 
 if __name__ == "__main__":
