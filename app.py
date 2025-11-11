@@ -74,26 +74,40 @@ def graph_get(path):
     return r.json()
 
 def _massage_messages(rows, base_url):
+    """Enrich rows with media_link (when possible) and a clean preview.
+       Supports both shapes:
+       A) {"image": {"id": "...", "caption": "..."}}
+       B) {"id": "...", "mime_type": "...", "caption": "..."} (inner object stored)
+    """
     out = []
+    base = (base_url or "").rstrip("/")
     for m in rows:
         m = dict(m)
         m["preview"] = m.get("body") or ""
         m["media_link"] = None
-        t = m.get("type")
+        t = (m.get("type") or "").lower()
+
         if t in {"image","audio","video","document","sticker"} and m.get("body"):
             try:
-                obj = json.loads(m["body"])
-                payload = obj.get(t) or {}
-                mid = payload.get("id")
-                cap = payload.get("caption") if t == "image" else None
-                if mid:
-                    m["media_link"] = f"{base_url.rstrip('/')}/wa/media/{mid}"
-                m["preview"] = (cap or f"{t.title()} • media_id={mid or 'n/a'}")
+                obj = json.loads(m["body"]) if isinstance(m["body"], str) else (m["body"] or {})
+                payload = None
+                if isinstance(obj, dict):
+                    # if outer keyed by type, use it; else assume inner object
+                    payload = obj.get(t) if t in obj and isinstance(obj.get(t), dict) else obj
+                mid = (payload or {}).get("id")
+                caption = (payload or {}).get("caption") if t == "image" else None
+
+                if mid and base:
+                    m["media_link"] = f"{base}/wa/media/{mid}"
+                m["preview"] = (caption or f"{t.title()} • media_id={mid or 'n/a'}")
             except Exception:
-                pass
+                # fallback: keep trimmed raw
+                if isinstance(m["preview"], str) and len(m["preview"]) > 1500:
+                    m["preview"] = m["preview"][:1500] + "…"
         else:
             if isinstance(m["preview"], str) and len(m["preview"]) > 1500:
                 m["preview"] = m["preview"][:1500] + "…"
+
         out.append(m)
     return out
 
@@ -330,3 +344,4 @@ def health():
 if __name__ == "__main__":
     # For local dev; Render uses Gunicorn (Procfile)
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
+
