@@ -2,31 +2,28 @@ import os, json, sqlite3, datetime, base64, csv, io
 from pathlib import Path
 from flask import (
     Flask, request, jsonify, render_template_string,
-    send_from_directory, redirect, url_for, Response, abort
+    send_from_directory, redirect, url_for, Response
 )
 import requests
 
 # -------- Config (env) --------
 VERIFY_TOKEN = os.getenv("WHATSAPP_VERIFY_TOKEN", "dev-verify")
-WA_PNID      = os.getenv("WA_PNID")      # e.g. 886670621191094
-WA_TOKEN     = os.getenv("WA_TOKEN")     # long-lived system user token
+WA_PNID      = os.getenv("WA_PNID")
+WA_TOKEN     = os.getenv("WA_TOKEN")
 GRAPH_BASE   = "https://graph.facebook.com/v21.0"
 
-# Minimal auth (HTTP Basic). If INBOX_PASS is unset -> auth disabled.
 INBOX_USER = os.getenv("INBOX_USER", "admin")
-INBOX_PASS = os.getenv("INBOX_PASS")  # set to enable
-PROTECT_MEDIA = os.getenv("PROTECT_MEDIA", "0") == "1"  # optional
+INBOX_PASS = os.getenv("INBOX_PASS")              # enable auth when set
+PROTECT_MEDIA = os.getenv("PROTECT_MEDIA", "0") == "1"
 
 APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = APP_DIR / "data"
-DATA_DIR.mkdir(exist_ok=True)
+DATA_DIR = APP_DIR / "data"; DATA_DIR.mkdir(exist_ok=True)
 DB_PATH  = DATA_DIR / "messages.db"
-STATIC_DIR = APP_DIR / "static"
-STATIC_DIR.mkdir(exist_ok=True)
+STATIC_DIR = APP_DIR / "static"; STATIC_DIR.mkdir(exist_ok=True)
 
 # -------- App --------
 app = Flask(__name__, static_folder=str(STATIC_DIR))
-app.url_map.strict_slashes = False  # accept /webhook and /webhook/
+app.url_map.strict_slashes = False
 
 # -------- DB --------
 def init_db():
@@ -52,16 +49,20 @@ def store_message(**kw):
         c.execute(f"INSERT INTO messages ({','.join(fields)}) VALUES ({','.join(['?']*len(fields))})", values)
         c.commit()
 
-def fetch_messages(limit=200, direction=None):
+def fetch_messages(limit=200, direction=None, since_id=None):
+    sql = "SELECT * FROM messages"
+    params = []
+    where = []
+    if direction in {"in","out"}:
+        where.append("direction = ?"); params.append(direction)
+    if since_id:
+        where.append("id > ?"); params.append(int(since_id))
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY id DESC LIMIT ?"; params.append(limit)
     with sqlite3.connect(DB_PATH) as c:
         c.row_factory = sqlite3.Row
-        if direction in {"in","out"}:
-            cur = c.execute(
-                "SELECT * FROM messages WHERE direction = ? ORDER BY id DESC LIMIT ?",
-                (direction, limit),
-            )
-        else:
-            cur = c.execute("SELECT * FROM messages ORDER BY id DESC LIMIT ?", (limit,))
+        cur = c.execute(sql, tuple(params))
         return [dict(r) for r in cur.fetchall()]
 
 init_db()
@@ -72,7 +73,6 @@ def _unauth():
 
 def require_basic_auth(fn):
     if not INBOX_PASS:
-        # Auth disabled
         return fn
     def _wrap(*args, **kwargs):
         auth = request.headers.get("Authorization", "")
@@ -85,7 +85,6 @@ def require_basic_auth(fn):
             except Exception:
                 pass
         return _unauth()
-    # Preserve endpoint name
     _wrap.__name__ = fn.__name__
     return _wrap
 
@@ -114,10 +113,6 @@ def graph_get(path):
     return r.json()
 
 def badge_class(status_text: str) -> str:
-    """
-    Map a status to a CSS class (color).
-    WhatsApp statuses we might see: sent, delivered, read, failed
-    """
     s = (status_text or "").lower()
     if s == "read":
         return "badge green"
@@ -130,10 +125,6 @@ def badge_class(status_text: str) -> str:
     return "badge gray"
 
 def _massage_messages(rows, base_url):
-    """Enrich rows with media_link and a clean preview. Supports:
-       A) {"image": {"id":"...","caption":"..."}}
-       B) {"id":"...","mime_type":"...","caption":"..."} (inner object stored)
-    """
     out = []
     base = (base_url or "").rstrip("/")
     for m in rows:
@@ -142,16 +133,12 @@ def _massage_messages(rows, base_url):
         m["media_link"] = None
         m["status_class"] = badge_class(m.get("status"))
         t = (m.get("type") or "").lower()
-
         if t in {"image","audio","video","document","sticker"} and m.get("body"):
             try:
                 obj = json.loads(m["body"]) if isinstance(m["body"], str) else (m["body"] or {})
-                payload = None
-                if isinstance(obj, dict):
-                    payload = obj.get(t) if t in obj and isinstance(obj.get(t), dict) else obj
+                payload = obj.get(t) if isinstance(obj, dict) and isinstance(obj.get(t), dict) else obj
                 mid = (payload or {}).get("id")
                 caption = (payload or {}).get("caption") if t == "image" else None
-
                 if mid and base:
                     m["media_link"] = f"{base}/wa/media/{mid}"
                 m["preview"] = (caption or f"{t.title()} • media_id={mid or 'n/a'}")
@@ -168,27 +155,17 @@ def _massage_messages(rows, base_url):
 def do_send(to, kind="text", text="", template=None):
     if not to:
         raise RuntimeError("missing 'to'")
-
     if kind == "text":
-        out = {
-            "messaging_product": "whatsapp",
-            "to": to,
-            "type": "text",
-            "text": {"body": text or ""}
-        }
+        out = {"messaging_product":"whatsapp","to":to,"type":"text","text":{"body": text or ""}}
     elif kind == "template":
         tpl = template or {}
-        name = tpl.get("name")
-        lang = tpl.get("language") or "en"
-        if not name:
-            raise RuntimeError("template.name required")
+        name = tpl.get("name"); lang = tpl.get("language") or "en"
+        if not name: raise RuntimeError("template.name required")
         t = {"name": name, "language": {"code": lang}}
-        if tpl.get("components"):
-            t["components"] = tpl["components"]
+        if tpl.get("components"): t["components"] = tpl["components"]
         out = {"messaging_product":"whatsapp","to":to,"type":"template","template":t}
     else:
         raise RuntimeError("unsupported kind")
-
     resp = graph_post(f"{WA_PNID}/messages", out)
     wa_id = (resp.get("messages") or [{}])[0].get("id")
     conv = resp.get("conversation") or {}
@@ -200,7 +177,7 @@ def do_send(to, kind="text", text="", template=None):
     )
     return resp
 
-# -------- Webhook (GET verify + POST events) --------
+# -------- Webhook --------
 @app.get("/webhook")
 def webhook_verify():
     if (request.args.get("hub.mode") == "subscribe"
@@ -212,33 +189,20 @@ def webhook_verify():
 def webhook_inbound():
     data = request.get_json(force=True, silent=True) or {}
     print("WEBHOOK:", json.dumps(data, ensure_ascii=False), flush=True)
-
-    # Only handle WhatsApp events
     if data.get("object") != "whatsapp_business_account":
         return jsonify(status="ignored"), 200
-
     try:
         for entry in (data.get("entry") or []):
             for ch in (entry.get("changes") or []):
                 value = ch.get("value") or {}
-
-                # Status updates
                 for st in (value.get("statuses") or []):
                     conv = st.get("conversation") or {}
                     store_message(
-                        direction="status",
-                        wa_from=None,
-                        wa_to=st.get("recipient_id"),
-                        wa_id=st.get("id"),
-                        name=None,
-                        type="status",
-                        body=json.dumps(st, ensure_ascii=False),
-                        status=st.get("status"),
-                        conversation_id=conv.get("id"),
-                        conversation_category=conv.get("category"),
+                        direction="status", wa_from=None, wa_to=st.get("recipient_id"),
+                        wa_id=st.get("id"), name=None, type="status",
+                        body=json.dumps(st, ensure_ascii=False), status=st.get("status"),
+                        conversation_id=conv.get("id"), conversation_category=conv.get("category"),
                     )
-
-                # Inbound messages
                 contacts = value.get("contacts") or [{}]
                 profile_name = (contacts[0].get("profile") or {}).get("name") if contacts else None
                 meta = value.get("metadata") or {}
@@ -249,50 +213,34 @@ def webhook_inbound():
                     else:
                         body = json.dumps(msg.get(mtype, {}) or {}, ensure_ascii=False)
                     store_message(
-                        direction="in",
-                        wa_from=msg.get("from"),
-                        wa_to=meta.get("display_phone_number"),
-                        wa_id=msg.get("id"),
-                        name=profile_name,
-                        type=mtype,
-                        body=body,
-                        status="received",
+                        direction="in", wa_from=msg.get("from"),
+                        wa_to=meta.get("display_phone_number"), wa_id=msg.get("id"),
+                        name=profile_name, type=mtype, body=body, status="received",
                         conversation_id=(msg.get("context") or {}).get("id"),
                         conversation_category=None,
                     )
     except Exception as e:
         print("Webhook parse error:", e, flush=True)
-
     return jsonify(status="ok"), 200
 
-# -------- UI (WhatsApp theme + Tabs + Scrollable + Status badges + Quick actions) --------
+# -------- UI (WhatsApp theme + tabs + scroll + badges + quick actions) --------
 INBOX_HTML = """
 <!doctype html><html lang="en"><meta charset="utf-8">
 <title>WhatsApp API Inbox - By Elite Dev.</title><meta name="viewport" content="width=device-width,initial-scale=1">
 <style>
- :root{
-   --wa-green:#25D366;
-   --wa-dark:#075E54;
-   --wa-light:#DCF8C6;
-   --wa-bg:#f6f7f9;
-   --text:#0f172a;
-   --blue:#3b82f6; --teal:#14b8a6; --green:#22c55e; --red:#ef4444; --gray:#64748b;
- }
+ :root{ --wa-green:#25D366; --wa-dark:#075E54; --wa-light:#DCF8C6; --wa-bg:#f6f7f9; --text:#0f172a;
+        --blue:#3b82f6; --teal:#14b8a6; --green:#22c55e; --red:#ef4444; --gray:#64748b; }
  body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--wa-bg);color:var(--text)}
  .wrap{max-width:1200px;margin:0 auto;padding:20px}
  .card{background:#fff;border-radius:12px;box-shadow:0 10px 24px rgba(0,0,0,.06);overflow:hidden;border:1px solid #eef2f7}
-
  .topbar{background:var(--wa-dark);color:#fff;padding:14px 18px;display:flex;align-items:center;gap:12px;justify-content:space-between}
- .pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;
-       background:#fff1; color:#fff; font-weight:600; letter-spacing:.2px}
-
+ .pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;background:#fff1;color:#fff;font-weight:600;letter-spacing:.2px}
  .tabs{display:flex;gap:8px;padding:10px;background:#fff;border-bottom:1px solid #eef2f7}
  .tab{padding:8px 14px;border-radius:10px;border:1px solid #e5e7eb;color:#334155;text-decoration:none}
  .tab.active{background:var(--wa-green);color:#fff;border-color:var(--wa-green)}
  .tab:hover{border-color:#cbd5e1}
  .righttools a{margin-left:10px;color:#334155;text-decoration:none}
  .righttools a:hover{color:#000}
-
  .compose{padding:16px;display:flex;flex-direction:column;gap:10px;background:#fff}
  .row{display:flex;gap:8px;flex-wrap:wrap}
  input,select,textarea,button{padding:.6rem .7rem;font:inherit;border:1px solid #d1d5db;border-radius:10px;outline:none}
@@ -300,7 +248,6 @@ INBOX_HTML = """
  button{background:var(--wa-green);color:#fff;border:1px solid var(--wa-green);cursor:pointer}
  button:hover{filter:brightness(.95)}
  textarea{width:100%;height:80px}
-
  .scrollwrap{max-height:70vh;overflow:auto;background:#fff}
  table{border-collapse:collapse;width:100%}
  th,td{border-bottom:1px solid #eef2f7;padding:10px 8px;text-align:left;vertical-align:top}
@@ -312,9 +259,10 @@ INBOX_HTML = """
  .badge.red{background:#fef2f2;border-color:#fecaca;color:#991b1b}
  .badge.gray{background:#f1f5f9;border-color:#cbd5e1;color:#334155}
  .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
-
  .qa a{display:inline-block;margin-right:8px;padding:.25rem .55rem;border-radius:8px;border:1px solid #e2e8f0;text-decoration:none;color:#0f172a;font-size:.9rem}
  .qa a:hover{background:#f8fafc}
+ #toast{position:fixed;right:16px;bottom:16px;z-index:9999;display:none;background:#16a34a;color:#fff;padding:.6rem .8rem;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,.2)}
+ #toast.error{background:#dc2626}
 </style>
 
 <div class="topbar">
@@ -334,10 +282,7 @@ INBOX_HTML = """
     <form class="compose" method="post" action="/inbox/send">
       <div class="row" style="width:100%">
         <input name="to" placeholder="+9617xxxxxx" required style="min-width:220px">
-        <select name="kind">
-          <option value="text" selected>Text</option>
-          <option value="template">Template</option>
-        </select>
+        <select name="kind"><option value="text" selected>Text</option><option value="template">Template</option></select>
         <input name="tpl_name" placeholder="template name (if template)">
         <input name="tpl_lang" placeholder="en" value="en" style="width:72px">
         <button type="submit">Send</button>
@@ -348,16 +293,16 @@ INBOX_HTML = """
     <div id="toast"></div>
 
     <div class="scrollwrap">
-      <table>
+      <table id="tbl">
         <thead>
           <tr>
             <th>When</th><th>Dir</th><th>From</th><th>To</th><th>Name</th>
             <th>Type</th><th>Status</th><th>Body / Media</th><th>Quick</th>
           </tr>
         </thead>
-        <tbody>
+        <tbody id="tbody">
         {% for m in messages %}
-          <tr>
+          <tr data-id="{{m.id}}">
             <td>{{m.created_at}}</td>
             <td><span class="badge">{{m.direction}}</span></td>
             <td>{{m.wa_from or ""}}</td>
@@ -392,37 +337,71 @@ INBOX_HTML = """
 <script>
 (function(){
   const params = new URLSearchParams(location.search);
-  const ok = params.get('sent');
-  const err = params.get('err');
+  const ok = params.get('sent'); const err = params.get('err');
   const toast = document.getElementById('toast');
   function show(msg, isErr){
-    toast.textContent = msg;
-    toast.style.position='fixed';
-    toast.style.right='16px';
-    toast.style.bottom='16px';
-    toast.style.zIndex='9999';
-    toast.style.display='block';
-    toast.style.background = isErr ? '#dc2626' : '#16a34a';
-    toast.style.color='#fff';
-    toast.style.padding='.6rem .8rem';
-    toast.style.borderRadius='10px';
-    toast.style.boxShadow='0 6px 18px rgba(0,0,0,.2)';
-    setTimeout(()=>{ toast.style.display='none'; }, 2200);
+    toast.textContent = msg; toast.className = isErr ? 'error' : '';
+    toast.style.display = 'block'; setTimeout(()=>{ toast.style.display='none'; }, 1800);
   }
   if(ok==='1'){ show('Message sent ✓', false); }
   if(err){ show('Failed: ' + err, true); }
+
+  // live polling every ~5s
+  const dir = (new URLSearchParams(location.search).get('dir')) || 'in';
+  const tbody = document.getElementById('tbody');
+  function currentTopId(){
+    const tr = tbody.querySelector('tr[data-id]');
+    return tr ? parseInt(tr.getAttribute('data-id')) : 0;
+  }
+  async function poll(){
+    try{
+      const since = currentTopId();
+      const res = await fetch(`/api/messages?dir=${encodeURIComponent(dir)}&since_id=${since}`);
+      if(!res.ok) return;
+      const items = await res.json(); // newest first
+      if(items.length){
+        for(const m of items){ // prepend in reverse so latest ends up at top
+          const tr = document.createElement('tr');
+          tr.setAttribute('data-id', m.id);
+          tr.innerHTML = `
+            <td>${m.created_at}</td>
+            <td><span class="badge">${m.direction||''}</span></td>
+            <td>${m.wa_from||''}</td>
+            <td>${m.wa_to||''}</td>
+            <td>${m.name||''}</td>
+            <td>${m.type||''}</td>
+            <td><span class="${m.status_class||'badge'}">${m.status||'—'}</span></td>
+            <td class="mono" style="max-width:520px;white-space:pre-wrap">
+              ${m.media_link ? `<a href="${m.media_link}" target="_blank" rel="noopener">Download ${m.type}</a><div style="opacity:.75">${m.preview||''}</div>` : (m.preview||'')}
+            </td>
+            <td class="qa">
+              ${
+                m.direction==='in' && m.wa_from
+                ? `<a href="/quick?to=${encodeURIComponent(m.wa_from)}&msg=%F0%9F%91%8D&redir=${dir}">👍</a>
+                   <a href="/quick?to=${encodeURIComponent(m.wa_from)}&msg=We%E2%80%99ll%20get%20back%20shortly.&redir=${dir}">Ack</a>`
+                : (m.direction==='out' && m.wa_to
+                   ? `<a href="/quick?to=${encodeURIComponent(m.wa_to)}&msg=Resending%20this.&redir=${dir}">Resend</a>`
+                   : ``)
+              }
+            </td>`;
+          tbody.insertBefore(tr, tbody.firstChild);
+        }
+        show(`+${items.length} new`, false);
+      }
+    }catch(e){ /* silent */ }
+  }
+  setInterval(poll, 5000);
 })();
 </script>
 </html>
 """
 
-# ---- Routes for Inbox UI (with dir tabs) ----
+# ---- Routes for Inbox UI ----
 @app.get("/inbox")
 @require_basic_auth
 def inbox():
     active_dir = request.args.get("dir") or "in"
-    if active_dir not in {"in","out"}:
-        active_dir = "in"
+    if active_dir not in {"in","out"}: active_dir = "in"
     base = request.url_root
     rows = _massage_messages(fetch_messages(200, direction=active_dir), base)
     return render_template_string(INBOX_HTML, messages=rows, active_dir=active_dir)
@@ -450,12 +429,11 @@ def inbox_send():
     except Exception as e:
         return redirect(url_for('inbox', dir='out', err=str(e)))
 
-# ---- Quick actions (send a short text to ?to=) ----
+# ---- Quick actions ----
 @app.get("/quick")
 @require_basic_auth
 def quick():
-    to = request.args.get("to")
-    msg = request.args.get("msg", "👍")
+    to = request.args.get("to"); msg = request.args.get("msg", "👍")
     redir = request.args.get("redir", "in")
     try:
         do_send(to, kind="text", text=msg)
@@ -463,20 +441,19 @@ def quick():
     except Exception as e:
         return redirect(url_for('inbox', dir=redir, err=str(e)))
 
-# -------- Privacy (optional) --------
+# ---- Privacy ----
 @app.get("/privacy")
 def privacy():
     p = STATIC_DIR / "privacy.html"
-    if p.exists():
-        return send_from_directory(app.static_folder, "privacy.html")
+    if p.exists(): return send_from_directory(app.static_folder, "privacy.html")
     return "No privacy.html uploaded", 200
 
-# -------- Health --------
+# ---- Health ----
 @app.get("/")
 def health():
     return jsonify(ok=True, pnid=bool(WA_PNID))
 
-# -------- Send API (JSON) --------
+# ---- Send API (JSON) ----
 @app.post("/send")
 def send_api():
     p = request.get_json(force=True, silent=False)
@@ -490,38 +467,35 @@ def send_api():
     except Exception as e:
         return jsonify(error=str(e)), 400
 
-# -------- Media download --------
+# ---- Media download ----
 @app.get("/wa/media/<media_id>")
 def wa_media(media_id):
     if PROTECT_MEDIA and INBOX_PASS:
-        # Require auth if protection toggled on
-        res = require_basic_auth(lambda: None)()
-        if isinstance(res, Response) and res.status_code == 401:
-            return res
-    meta = graph_get(media_id)    # -> {"url": "..."}
+        # simple gate when protection is toggled on
+        wrapped = require_basic_auth(lambda: Response("ok",200))()
+        if isinstance(wrapped, Response) and wrapped.status_code == 401:
+            return wrapped
+    meta = graph_get(media_id)
     url = meta.get("url")
-    if not url:
-        return jsonify(error="no url for media"), 404
+    if not url: return jsonify(error="no url for media"), 404
     r = requests.get(url, headers={"Authorization": f"Bearer {WA_TOKEN}"}, timeout=25)
     if not r.ok:
         return (r.text, r.status_code, {"Content-Type": "application/json"})
     ctype = r.headers.get("Content-Type", "application/octet-stream")
     return (r.content, 200, {"Content-Type": ctype})
 
-# -------- CSV export --------
+# ---- CSV export ----
 @app.get("/export.csv")
 @require_basic_auth
 def export_csv():
     direction = request.args.get("dir")
-    if direction not in {"in","out"}:
-        direction = None
+    if direction not in {"in","out"}: direction = None
     rows = fetch_messages(2000, direction=direction)
-    buf = io.StringIO()
-    writer = csv.writer(buf)
-    writer.writerow(["created_at","direction","wa_from","wa_to","wa_id","name","type","status","conversation_id","conversation_category","body"])
+    buf = io.StringIO(); writer = csv.writer(buf)
+    writer.writerow(["id","created_at","direction","wa_from","wa_to","wa_id","name","type","status","conversation_id","conversation_category","body"])
     for m in rows:
         writer.writerow([
-            m.get("created_at"), m.get("direction"), m.get("wa_from"), m.get("wa_to"),
+            m.get("id"), m.get("created_at"), m.get("direction"), m.get("wa_from"), m.get("wa_to"),
             m.get("wa_id"), m.get("name"), m.get("type"), m.get("status"),
             m.get("conversation_id"), m.get("conversation_category"),
             (m.get("body") or "").replace("\n"," ").replace("\r"," ")
@@ -532,6 +506,18 @@ def export_csv():
         mimetype="text/csv",
         headers={"Content-Disposition": f'attachment; filename="messages_{direction or "all"}.csv"'}
     )
+
+# ---- Live feed API (polling) ----
+@app.get("/api/messages")
+@require_basic_auth
+def api_messages():
+    direction = request.args.get("dir")
+    if direction not in {"in","out"}: direction = None
+    since_id = request.args.get("since_id")
+    base = request.url_root
+    rows = _massage_messages(fetch_messages(200, direction=direction, since_id=since_id), base)
+    # Return newest-first (already sorted DESC)
+    return jsonify(rows)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=int(os.getenv("PORT", "8000")), debug=True)
