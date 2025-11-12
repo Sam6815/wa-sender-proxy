@@ -1,15 +1,15 @@
-import os, json, sqlite3, base64, csv, io
+import os, json, sqlite3, base64, csv, io, time
 from pathlib import Path
 from flask import (
     Flask, request, jsonify, render_template_string,
     send_from_directory, redirect, url_for, Response
 )
 import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # --- Timezone formatting (GMT+2 with AM/PM) ---
 from datetime import datetime, timezone, timedelta
 TZ_GMT2 = timezone(timedelta(hours=2))
-
 def fmt_gmt2(iso_str: str) -> str:
     try:
         dt = datetime.fromisoformat(iso_str)  # stored as naive UTC ISO
@@ -29,6 +29,11 @@ GRAPH_BASE   = "https://graph.facebook.com/v21.0"
 INBOX_USER = os.getenv("INBOX_USER", "admin")
 INBOX_PASS = os.getenv("INBOX_PASS")              # enable auth when set
 PROTECT_MEDIA = os.getenv("PROTECT_MEDIA", "0") == "1"
+
+# Bulk defaults
+BULK_CONCURRENCY_DEFAULT = int(os.getenv("BULK_CONCURRENCY", "5"))
+BULK_SLEEP_DEFAULT = float(os.getenv("BULK_PER_CALL_SLEEP", "0.1"))  # 0.1s per your request
+BULK_MAX_RETRIES = int(os.getenv("BULK_MAX_RETRIES", "2"))
 
 APP_DIR = Path(__file__).resolve().parent
 DATA_DIR = APP_DIR / "data"; DATA_DIR.mkdir(exist_ok=True)
@@ -144,7 +149,6 @@ def _massage_messages(rows, base_url):
     base = (base_url or "").rstrip("/")
     for m in rows:
         m = dict(m)
-        # formatted display time
         m["created_fmt"] = fmt_gmt2(m.get("created_at", ""))
         m["preview"] = m.get("body") or ""
         m["media_link"] = None
@@ -194,6 +198,45 @@ def do_send(to, kind="text", text="", template=None):
     )
     return resp
 
+# ---------- BULK SEND ----------
+def do_send_safe(number, kind="template", text="", template=None):
+    try:
+        return {"to": number, "ok": True, "resp": do_send(number, kind=kind, text=text, template=template)}
+    except Exception as e:
+        return {"to": number, "ok": False, "error": str(e)}
+
+def bulk_send(numbers, kind="template", text="", template=None, concurrency=None, per_call_sleep=None, max_retries=BULK_MAX_RETRIES):
+    numbers = [n.strip() for n in numbers if n and n.strip()]
+    if not numbers:
+        return []
+    if concurrency is None:
+        concurrency = BULK_CONCURRENCY_DEFAULT
+    if per_call_sleep is None:
+        per_call_sleep = BULK_SLEEP_DEFAULT
+
+    results = []
+    def worker(n):
+        attempt = 0
+        while True:
+            r = do_send_safe(n, kind=kind, text=text, template=template)
+            if r["ok"]:
+                return r
+            transient = any(tok in (r.get("error","")) for tok in [" 429 ", "Rate", "rate", "temporar", " 5"])
+            if not transient or attempt >= max_retries:
+                return r
+            time.sleep(1.5 * (attempt + 1))
+            attempt += 1
+
+    with ThreadPoolExecutor(max_workers=max(1, int(concurrency))) as ex:
+        futs = []
+        for n in numbers:
+            futs.append(ex.submit(worker, n))
+            if per_call_sleep:
+                time.sleep(per_call_sleep)
+        for f in as_completed(futs):
+            results.append(f.result())
+    return results
+
 # -------- Webhook --------
 @app.get("/webhook")
 def webhook_verify():
@@ -242,7 +285,15 @@ def webhook_inbound():
         print("Webhook parse error:", e, flush=True)
     return jsonify(status="ok"), 200
 
-# -------- UI (WhatsApp theme + tabs + scroll + badges + quick actions) --------
+# -------- UI (WhatsApp theme + tabs + scroll + badges + quick actions + BULK) --------
+# Bilingual ACK message (URL-encoded for quick links)
+ACK_MSG_EN_AR = (
+    "Thank you for contacting Al-Khawarizmi Group — your request is being processed and we will contact you shortly after. "
+    "شكراً لتواصلكم مع مجموعة الخوارزمي — جارٍ معالجة طلبكم وسنتواصل معكم قريباً."
+)
+import urllib.parse
+ACK_MSG_EN_AR_ENC = urllib.parse.quote(ACK_MSG_EN_AR)
+
 INBOX_HTML = """
 <!doctype html><html lang="en"><meta charset="utf-8">
 <title>WhatsApp API Inbox - By Elite Dev.</title><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -282,6 +333,12 @@ INBOX_HTML = """
  .qa a:hover{background:#f8fafc}
  #toast{position:fixed;right:16px;bottom:16px;z-index:9999;display:none;background:#16a34a;color:#fff;padding:.6rem .8rem;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,.2)}
  #toast.error{background:#dc2626}
+
+ /* Bulk panel */
+ .bulk{padding:16px;border-top:1px dashed #e5e7eb;background:#fff}
+ .bulk h3{margin:.2rem 0 10px 0;font-size:1rem;color:#0f172a}
+ .bulk .row > *{flex:1 1 220px}
+ .small{font-size:.85rem;color:#64748b}
 </style>
 
 <div class="topbar">
@@ -298,6 +355,7 @@ INBOX_HTML = """
       <a class="tab {% if active_dir == 'out' %}active{% endif %}" href="/inbox?dir=out">Sent</a>
     </div>
 
+    <!-- Single send -->
     <form class="compose" method="post" action="/inbox/send">
       <div class="row" style="width:100%">
         <input name="to" placeholder="+9617xxxxxx" required style="min-width:220px">
@@ -307,7 +365,36 @@ INBOX_HTML = """
         <button type="submit">Send</button>
       </div>
       <textarea name="text" placeholder="Text body OR JSON array of template components"></textarea>
+      <div class="small">Tip: For templates, paste components JSON (optional). For text, body is used as-is.</div>
     </form>
+
+    <!-- Bulk send -->
+    <div class="bulk">
+      <h3>Bulk Send</h3>
+      <form method="post" action="/inbox/bulk">
+        <div class="row" style="width:100%">
+          <textarea name="numbers" placeholder="One number per line (e.g. +9617xxxxxx)" style="height:120px" required></textarea>
+          <div style="min-width:280px">
+            <label class="small">Kind</label>
+            <select name="kind" style="width:100%">
+              <option value="template" selected>Template (recommended)</option>
+              <option value="text">Text (24h service window)</option>
+            </select>
+            <label class="small">Template name</label>
+            <input name="tpl_name" placeholder="hello_world1">
+            <label class="small">Language</label>
+            <input name="tpl_lang" value="en">
+            <label class="small">Concurrency</label>
+            <input name="concurrency" value="5" type="number" min="1" max="20">
+            <label class="small">Per-call sleep (sec)</label>
+            <input name="sleep" value="0.1" type="number" step="0.01" min="0">
+          </div>
+        </div>
+        <textarea name="payload" placeholder='For template: components JSON array (optional). For text: message body.'></textarea>
+        <button type="submit">Send Bulk</button>
+        <div class="small">Note: Marketing/out-of-session must use approved templates.</div>
+      </form>
+    </div>
 
     <div id="toast"></div>
 
@@ -340,7 +427,7 @@ INBOX_HTML = """
             <td class="qa">
               {% if m.direction == 'in' and m.wa_from %}
                 <a href="/quick?to={{m.wa_from}}&msg=%F0%9F%91%8D&redir={{active_dir}}">👍</a>
-                <a href="/quick?to={{m.wa_from}}&msg=We%E2%80%99ll%20get%20back%20shortly.&redir={{active_dir}}">Ack</a>
+                <a href="/quick?to={{m.wa_from}}&msg={{ack_msg_enc}}&redir={{active_dir}}">Auto-Reply</a>
               {% elif m.direction == 'out' and m.wa_to %}
                 <a href="/quick?to={{m.wa_to}}&msg=Resending%20this.&redir={{active_dir}}">Resend</a>
               {% endif %}
@@ -397,7 +484,7 @@ INBOX_HTML = """
               ${
                 m.direction==='in' && m.wa_from
                 ? `<a href="/quick?to=${encodeURIComponent(m.wa_from)}&msg=%F0%9F%91%8D&redir=${dir}">👍</a>
-                   <a href="/quick?to=${encodeURIComponent(m.wa_from)}&msg=We%E2%80%99ll%20get%20back%20shortly.&redir=${dir}">Ack</a>`
+                   <a href="/quick?to=${encodeURIComponent(m.wa_from)}&msg={{ack_msg_enc}}&redir=${dir}">Auto-Reply</a>`
                 : (m.direction==='out' && m.wa_to
                    ? `<a href="/quick?to=${encodeURIComponent(m.wa_to)}&msg=Resending%20this.&redir=${dir}">Resend</a>`
                    : ``)
@@ -423,7 +510,7 @@ def inbox():
     if active_dir not in {"in","out"}: active_dir = "in"
     base = request.url_root
     rows = _massage_messages(fetch_messages(200, direction=active_dir), base)
-    return render_template_string(INBOX_HTML, messages=rows, active_dir=active_dir)
+    return render_template_string(INBOX_HTML, messages=rows, active_dir=active_dir, ack_msg_enc=ACK_MSG_EN_AR_ENC)
 
 @app.post("/inbox/send")
 @require_basic_auth
@@ -447,6 +534,94 @@ def inbox_send():
         return redirect(url_for('inbox', dir='out', sent='1'))
     except Exception as e:
         return redirect(url_for('inbox', dir='out', err=str(e)))
+
+# ---- Bulk UI handler ----
+@app.post("/inbox/bulk")
+@require_basic_auth
+def inbox_bulk():
+    raw = (request.form.get("numbers") or "").strip()
+    numbers = [n.strip() for n in raw.splitlines() if n.strip()]
+    kind = request.form.get("kind","template")
+    tpl_name = request.form.get("tpl_name") or ""
+    tpl_lang = request.form.get("tpl_lang") or "en"
+    sleep = request.form.get("sleep")
+    conc = request.form.get("concurrency")
+
+    try:
+        if kind == "text":
+            text = (request.form.get("payload") or "").strip()
+            results = bulk_send(
+                numbers,
+                kind="text",
+                text=text,
+                concurrency=int(conc or BULK_CONCURRENCY_DEFAULT),
+                per_call_sleep=float(sleep or BULK_SLEEP_DEFAULT)
+            )
+        else:
+            comps = None
+            payload_str = (request.form.get("payload") or "").strip()
+            if payload_str:
+                try: comps = json.loads(payload_str)
+                except: comps = None
+            tpl = {"name": tpl_name, "language": tpl_lang}
+            if comps: tpl["components"] = comps
+            results = bulk_send(
+                numbers,
+                kind="template",
+                template=tpl,
+                concurrency=int(conc or BULK_CONCURRENCY_DEFAULT),
+                per_call_sleep=float(sleep or BULK_SLEEP_DEFAULT)
+            )
+        # summarize
+        ok = sum(1 for r in results if r.get("ok"))
+        failed = len(results) - ok
+        return redirect(url_for('inbox', dir='out', sent='1' if ok else None, err=None if failed==0 else f"{failed} failed"))
+    except Exception as e:
+        return redirect(url_for('inbox', dir='out', err=str(e)))
+
+# ---- Bulk API (JSON) ----
+@app.post("/bulk")
+@require_basic_auth
+def bulk_api():
+    """
+    JSON:
+    {
+      "to": ["+9617xxxxxx", "+9613yyyyyy"],
+      "kind": "template",
+      "text": "Hi",                               # when kind=text
+      "template": {"name":"hello_world1","language":"en","components":[...]},
+      "concurrency": 5,
+      "per_call_sleep": 0.1
+    }
+    """
+    p = request.get_json(force=True, silent=False)
+    numbers = p.get("to") or []
+    if not isinstance(numbers, list) or not numbers:
+        return jsonify(error="provide 'to' as a non-empty list"), 400
+
+    kind = p.get("kind", "template")
+    if kind not in ("text","template"):
+        return jsonify(error="kind must be 'text' or 'template'"), 400
+
+    if kind == "text":
+        text = p.get("text","")
+        results = bulk_send(
+            numbers, kind="text", text=text,
+            concurrency=int(p.get("concurrency", BULK_CONCURRENCY_DEFAULT)),
+            per_call_sleep=float(p.get("per_call_sleep", BULK_SLEEP_DEFAULT))
+        )
+    else:
+        tpl = p.get("template") or {}
+        if not tpl.get("name"):
+            return jsonify(error="template.name required for kind=template"), 400
+        results = bulk_send(
+            numbers, kind="template", template=tpl,
+            concurrency=int(p.get("concurrency", BULK_CONCURRENCY_DEFAULT)),
+            per_call_sleep=float(p.get("per_call_sleep", BULK_SLEEP_DEFAULT))
+        )
+    ok = sum(1 for r in results if r.get("ok"))
+    failed = [r for r in results if not r.get("ok")]
+    return jsonify(sent=ok, failed=len(failed), failures=failed), 200
 
 # ---- Quick actions ----
 @app.get("/quick")
@@ -474,6 +649,7 @@ def health():
 
 # ---- Send API (JSON) ----
 @app.post("/send")
+@require_basic_auth
 def send_api():
     p = request.get_json(force=True, silent=False)
     to = p.get("to"); kind = p.get("kind","text")
@@ -510,13 +686,13 @@ def export_csv():
     if direction not in {"in","out"}: direction = None
     rows = fetch_messages(2000, direction=direction)
     buf = io.StringIO(); writer = csv.writer(buf)
-    writer.writerow(["id","created_at","direction","wa_from","wa_to","wa_id","name","type","status","conversation_id","conversation_category","body"])
+    writer.writerow(["id","created_at(GMT+2)","direction","wa_from","wa_to","wa_id","name","type","status","conversation_id","conversation_category","body"])
     for m in rows:
         writer.writerow([
             m.get("id"), fmt_gmt2(m.get("created_at","")), m.get("direction"), m.get("wa_from"), m.get("wa_to"),
             m.get("wa_id"), m.get("name"), m.get("type"), m.get("status"),
             m.get("conversation_id"), m.get("conversation_category"),
-            (m.get("body") or "").replace("\\n"," ").replace("\\r"," ")
+            (m.get("body") or "").replace("\n"," ").replace("\r"," ")
         ])
     buf.seek(0)
     return Response(
