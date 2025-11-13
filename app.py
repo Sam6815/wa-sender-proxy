@@ -1,4 +1,4 @@
-import os, json, sqlite3, base64, csv, io, time
+import os, json, sqlite3, base64, csv, io, time, urllib.parse
 from pathlib import Path
 from flask import (
     Flask, request, jsonify, render_template_string,
@@ -30,6 +30,9 @@ INBOX_USER = os.getenv("INBOX_USER", "admin")
 INBOX_PASS = os.getenv("INBOX_PASS")              # enable auth when set
 PROTECT_MEDIA = os.getenv("PROTECT_MEDIA", "0") == "1"
 
+# DB (Postgres on Render, SQLite locally)
+DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgresql://user:pass@host:5432/dbname
+
 # Bulk defaults
 BULK_CONCURRENCY_DEFAULT = int(os.getenv("BULK_CONCURRENCY", "5"))
 BULK_SLEEP_DEFAULT = float(os.getenv("BULK_PER_CALL_SLEEP", "0.1"))  # 0.1s per your request
@@ -44,46 +47,119 @@ STATIC_DIR = APP_DIR / "static"; STATIC_DIR.mkdir(exist_ok=True)
 app = Flask(__name__, static_folder=str(STATIC_DIR))
 app.url_map.strict_slashes = False
 
-# -------- DB --------
-def init_db():
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute("""
-        CREATE TABLE IF NOT EXISTS messages (
-          id INTEGER PRIMARY KEY AUTOINCREMENT,
-          created_at TEXT,
-          direction TEXT,          -- 'in' | 'out' | 'status' | 'unknown'
-          wa_from TEXT, wa_to TEXT, wa_id TEXT,
-          name TEXT, type TEXT, body TEXT,
-          status TEXT,
-          conversation_id TEXT, conversation_category TEXT
+# -------- DB (SQLite locally, Postgres when DATABASE_URL is set) --------
+
+def get_conn():
+    """
+    If DATABASE_URL is set -> Postgres (Render).
+    Otherwise -> local SQLite (messages.db).
+    """
+    if DATABASE_URL:
+        import psycopg2
+        url = urllib.parse.urlparse(DATABASE_URL)
+        dbname = url.path[1:]
+        user = url.username
+        password = url.password
+        host = url.hostname
+        port = url.port or 5432
+        conn = psycopg2.connect(
+            dbname=dbname,
+            user=user,
+            password=password,
+            host=host,
+            port=port,
         )
-        """)
-        c.commit()
+        conn.autocommit = True
+        return conn
+    else:
+        return sqlite3.connect(DB_PATH)
+
+def init_db():
+    """
+    Create the messages table on first run.
+    Uses Postgres DDL when DATABASE_URL is present, otherwise SQLite.
+    """
+    with get_conn() as c:
+        cur = c.cursor()
+        if DATABASE_URL:
+            # Postgres
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+              id SERIAL PRIMARY KEY,
+              created_at TEXT,
+              direction TEXT,
+              wa_from TEXT, wa_to TEXT, wa_id TEXT,
+              name TEXT, type TEXT, body TEXT,
+              status TEXT,
+              conversation_id TEXT, conversation_category TEXT
+            )
+            """)
+        else:
+            # SQLite
+            cur.execute("""
+            CREATE TABLE IF NOT EXISTS messages (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              created_at TEXT,
+              direction TEXT,          -- 'in' | 'out' | 'status' | 'unknown'
+              wa_from TEXT, wa_to TEXT, wa_id TEXT,
+              name TEXT, type TEXT, body TEXT,
+              status TEXT,
+              conversation_id TEXT, conversation_category TEXT
+            )
+            """)
 
 def store_message(**kw):
-    fields = ("created_at","direction","wa_from","wa_to","wa_id","name",
-              "type","body","status","conversation_id","conversation_category")
+    fields = (
+        "created_at","direction","wa_from","wa_to","wa_id","name",
+        "type","body","status","conversation_id","conversation_category"
+    )
     # store as UTC naive ISO for consistency
-    values = [kw.get("created_at") or datetime.utcnow().isoformat()] + [kw.get(f) for f in fields[1:]]
-    with sqlite3.connect(DB_PATH) as c:
-        c.execute(f"INSERT INTO messages ({','.join(fields)}) VALUES ({','.join(['?']*len(fields))})", values)
-        c.commit()
+    values = [kw.get("created_at") or datetime.utcnow().isoformat()] + [
+        kw.get(f) for f in fields[1:]
+    ]
+    with get_conn() as c:
+        cur = c.cursor()
+        if DATABASE_URL:
+            placeholders = ",".join(["%s"] * len(fields))
+        else:
+            placeholders = ",".join(["?"] * len(fields))
+        cur.execute(
+            f"INSERT INTO messages ({','.join(fields)}) VALUES ({placeholders})",
+            values
+        )
 
 def fetch_messages(limit=200, direction=None, since_id=None):
-    sql = "SELECT * FROM messages"
+    sql = """
+      SELECT
+        id, created_at, direction, wa_from, wa_to, wa_id,
+        name, type, body, status, conversation_id, conversation_category
+      FROM messages
+    """
     params = []
     where = []
     if direction in {"in","out"}:
-        where.append("direction = ?"); params.append(direction)
+        where.append("direction = %s" if DATABASE_URL else "direction = ?")
+        params.append(direction)
     if since_id:
-        where.append("id > ?"); params.append(int(since_id))
+        where.append("id > %s" if DATABASE_URL else "id > ?")
+        params.append(int(since_id))
     if where:
         sql += " WHERE " + " AND ".join(where)
-    sql += " ORDER BY id DESC LIMIT ?"; params.append(limit)
-    with sqlite3.connect(DB_PATH) as c:
-        c.row_factory = sqlite3.Row
-        cur = c.execute(sql, tuple(params))
-        return [dict(r) for r in cur.fetchall()]
+    sql += " ORDER BY id DESC"
+    sql += " LIMIT " + ("%s" if DATABASE_URL else "?")
+    params.append(limit)
+
+    with get_conn() as c:
+        if DATABASE_URL:
+            import psycopg2.extras
+            cur = c.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cur.execute(sql, params)
+            rows = cur.fetchall()
+            return [dict(r) for r in rows]
+        else:
+            c.row_factory = sqlite3.Row
+            cur = c.execute(sql, tuple(params))
+            return [dict(r) for r in cur.fetchall()]
 
 init_db()
 
@@ -291,12 +367,12 @@ ACK_MSG_EN_AR = (
     "Thank you for contacting Al-Khawarizmi Group — your request is being processed and we will contact you shortly after. "
     "شكراً لتواصلكم مع مجموعة الخوارزمي — جارٍ معالجة طلبكم وسنتواصل معكم قريباً."
 )
-import urllib.parse
 ACK_MSG_EN_AR_ENC = urllib.parse.quote(ACK_MSG_EN_AR)
 
 INBOX_HTML = """
-<!doctype html><html lang="en"><meta charset="utf-8">
+<!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>WhatsApp API Inbox - By Elite Dev.</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="icon" href="/favicon.ico">
 <style>
  :root{ --wa-green:#25D366; --wa-dark:#075E54; --wa-light:#DCF8C6; --wa-bg:#f6f7f9; --text:#0f172a;
         --blue:#3b82f6; --teal:#14b8a6; --green:#22c55e; --red:#ef4444; --gray:#64748b; }
@@ -339,7 +415,7 @@ INBOX_HTML = """
  .bulk h3{margin:.2rem 0 10px 0;font-size:1rem;color:#0f172a}
  .bulk .row > *{flex:1 1 220px}
  .small{font-size:.85rem;color:#64748b}
-</style>
+</style></head>
 
 <div class="topbar">
   <div class="pill">WhatsApp API Inbox - Al-Khawarizmi Group</div>
@@ -634,6 +710,15 @@ def quick():
         return redirect(url_for('inbox', dir=redir, sent='1'))
     except Exception as e:
         return redirect(url_for('inbox', dir=redir, err=str(e)))
+
+# ---- Favicon ----
+@app.route("/favicon.ico")
+def favicon():
+    return send_from_directory(
+        app.static_folder,
+        "favicon.ico",
+        mimetype="image/x-icon"
+    )
 
 # ---- Privacy ----
 @app.get("/privacy")
