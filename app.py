@@ -31,7 +31,7 @@ INBOX_PASS = os.getenv("INBOX_PASS")              # enable auth when set
 PROTECT_MEDIA = os.getenv("PROTECT_MEDIA", "0") == "1"
 
 # DB (Postgres on Render, SQLite locally)
-DATABASE_URL = os.getenv("DATABASE_URL")  # e.g. postgresql://user:pass@host:5432/dbname
+DATABASE_URL = os.getenv("DATABASE_URL") or ""  # e.g. postgres://user:pass@host:5432/dbname
 
 # Bulk defaults
 BULK_CONCURRENCY_DEFAULT = int(os.getenv("BULK_CONCURRENCY", "5"))
@@ -53,26 +53,24 @@ def get_conn():
     """
     If DATABASE_URL is set -> Postgres (Render).
     Otherwise -> local SQLite (messages.db).
+
+    We add connect_timeout to avoid hanging the deploy if Postgres is misconfigured.
     """
     if DATABASE_URL:
         import psycopg2
-        url = urllib.parse.urlparse(DATABASE_URL)
-        dbname = url.path[1:]
-        user = url.username
-        password = url.password
-        host = url.hostname
-        port = url.port or 5432
-        conn = psycopg2.connect(
-            dbname=dbname,
-            user=user,
-            password=password,
-            host=host,
-            port=port,
-        )
-        conn.autocommit = True
-        return conn
-    else:
-        return sqlite3.connect(DB_PATH)
+        try:
+            # Use DSN directly so sslmode and other params in the URL are respected.
+            conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
+            conn.autocommit = True
+            return conn
+        except Exception as e:
+            print("⚠️ Postgres connection failed:", e, flush=True)
+            # Fail fast so Render shows a clear error instead of a generic timeout
+            raise
+
+    # Fallback: SQLite (used locally when DATABASE_URL is not set)
+    return sqlite3.connect(DB_PATH)
+
 
 def init_db():
     """
@@ -161,7 +159,14 @@ def fetch_messages(limit=200, direction=None, since_id=None):
             cur = c.execute(sql, tuple(params))
             return [dict(r) for r in cur.fetchall()]
 
-init_db()
+# Initialize DB at import
+try:
+    init_db()
+    print(f"DB backend: {'Postgres' if DATABASE_URL else 'SQLite'}", flush=True)
+except Exception as e:
+    # If this prints in Render logs, fix DATABASE_URL or temporarily unset it.
+    print("❌ init_db failed:", e, flush=True)
+    raise
 
 # -------- Minimal HTTP Basic auth --------
 def _unauth():
@@ -320,7 +325,7 @@ def webhook_verify():
         and request.args.get("hub.verify_token") == VERIFY_TOKEN):
         return request.args.get("hub.challenge", ""), 200
     return "forbidden", 403
-    
+
 # ------- CHATBOT IMPLEMENTATION --------------
 def auto_reply_for_text(text, profile_name=None):
     """
