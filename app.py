@@ -398,35 +398,36 @@ def webhook_inbound():
                 contacts = value.get("contacts") or [{}]
                 profile_name = (contacts[0].get("profile") or {}).get("name") if contacts else None
                 meta = value.get("metadata") or {}
+                
                 for msg in (value.get("messages") or []):
-                mtype = msg.get("type")
+                    mtype = msg.get("type")
 
-                inbound_text = None
-                if mtype == "text":
-                    inbound_text = (msg.get("text") or {}).get("body", "")
-                    body = inbound_text
-                else:
-                    body = json.dumps(msg.get(mtype, {}) or {}, ensure_ascii=False)
+                    inbound_text = None
+                    if mtype == "text":
+                        inbound_text = (msg.get("text") or {}).get("body", "")
+                        body = inbound_text
+                    else:
+                        body = json.dumps(msg.get(mtype, {}) or {}, ensure_ascii=False)
 
-                # Store inbound message
-                store_message(
-                    direction="in", wa_from=msg.get("from"),
-                    wa_to=meta.get("display_phone_number"), wa_id=msg.get("id"),
-                    name=profile_name, type=mtype, body=body, status="received",
-                    conversation_id=(msg.get("context") or {}).get("id"),
-                    conversation_category=None,
-                )
+                    # Store inbound message
+                    store_message(
+                        direction="in", wa_from=msg.get("from"),
+                        wa_to=meta.get("display_phone_number"), wa_id=msg.get("id"),
+                        name=profile_name, type=mtype, body=body, status="received",
+                        conversation_id=(msg.get("context") or {}).get("id"),
+                        conversation_category=None,
+                    )
 
-                # --- AUTO REPLY LOGIC ---
-                try:
-                    # Only auto-reply to text messages for now
-                    if inbound_text:
-                        reply_text = auto_reply_for_text(inbound_text, profile_name=profile_name)
-                        if reply_text:
-                            # msg["from"] is the user's WhatsApp number
-                            do_send(msg.get("from"), kind="text", text=reply_text)
-                except Exception as e:
-                    print("Auto-reply failed:", e, flush=True)
+                    # --- AUTO REPLY LOGIC ---
+                    try:
+                        # Only auto-reply to text messages for now
+                        if inbound_text:
+                            reply_text = auto_reply_for_text(inbound_text, profile_name=profile_name)
+                            if reply_text:
+                                # msg["from"] is the user's WhatsApp number
+                                do_send(msg.get("from"), kind="text", text=reply_text)
+                    except Exception as e:
+                        print("Auto-reply failed:", e, flush=True)
     except Exception as e:
         print("Webhook parse error:", e, flush=True)
     return jsonify(status="ok"), 200
