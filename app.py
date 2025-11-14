@@ -320,6 +320,60 @@ def webhook_verify():
         and request.args.get("hub.verify_token") == VERIFY_TOKEN):
         return request.args.get("hub.challenge", ""), 200
     return "forbidden", 403
+    
+# ------- CHATBOT IMPLEMENTATION --------------
+def auto_reply_for_text(text, profile_name=None):
+    """
+    Given the inbound text, return a reply string or None to skip auto-reply.
+    Very simple rule-based example.
+    """
+    if not text:
+        return None
+
+    t = text.strip().lower()
+
+    # Greeting
+    if any(g in t for g in ["hi", "hello", "helo", "مرحبا", "salam", "سلامات", "سلام" ]):
+        name_part = f" {profile_name}" if profile_name else ""
+        return (
+            f"Hello{name_part} 👋\n"
+            "Welcome to Al-Khawarizmi Group.\n\n"
+            "Type:\n"
+            "1️ for Construction & Contracting\n"
+            "2️ for Solar / PV Systems\n"
+            "3️ to talk to a representative."
+        )
+
+    # Menu options
+    if t in ["1", "construction", "contracting", "انشاءات", "مقاولات"]:
+        return (
+            "*Construction & Contracting*\n\n"
+            "We handle:\n"
+            "• Concrete RC & formwork\n"
+            "• Villas & buildings\n"
+            "• Renovation & finishing\n\n"
+            "Send your project location + any drawings (if available) and we’ll follow up."
+        )
+
+    if t in ["2", "solar", "pv", "طاقة", "طاقة شمسية"]:
+        return (
+            "*Solar / PV Systems*\n\n"
+            "Please share:\n"
+            "• Your area / village\n"
+            "• Average monthly bill\n"
+            "• Number of AC / main loads\n\n"
+            "Our team will estimate a suitable system and contact you."
+        )
+
+    if t in ["3", "agent", "support", "موظف", "انسان"]:
+        return (
+            "A representative will take over this conversation shortly.\n"
+            "Thank you for your patience."
+        )
+
+    # Fallback to standard AUTO-REPLY
+    return ACK_MSG_EN_AR
+
 
 @app.post("/webhook")
 def webhook_inbound():
@@ -345,18 +399,34 @@ def webhook_inbound():
                 profile_name = (contacts[0].get("profile") or {}).get("name") if contacts else None
                 meta = value.get("metadata") or {}
                 for msg in (value.get("messages") or []):
-                    mtype = msg.get("type")
-                    if mtype == "text":
-                        body = (msg.get("text") or {}).get("body", "")
-                    else:
-                        body = json.dumps(msg.get(mtype, {}) or {}, ensure_ascii=False)
-                    store_message(
-                        direction="in", wa_from=msg.get("from"),
-                        wa_to=meta.get("display_phone_number"), wa_id=msg.get("id"),
-                        name=profile_name, type=mtype, body=body, status="received",
-                        conversation_id=(msg.get("context") or {}).get("id"),
-                        conversation_category=None,
-                    )
+                mtype = msg.get("type")
+
+                inbound_text = None
+                if mtype == "text":
+                    inbound_text = (msg.get("text") or {}).get("body", "")
+                    body = inbound_text
+                else:
+                    body = json.dumps(msg.get(mtype, {}) or {}, ensure_ascii=False)
+
+                # Store inbound message
+                store_message(
+                    direction="in", wa_from=msg.get("from"),
+                    wa_to=meta.get("display_phone_number"), wa_id=msg.get("id"),
+                    name=profile_name, type=mtype, body=body, status="received",
+                    conversation_id=(msg.get("context") or {}).get("id"),
+                    conversation_category=None,
+                )
+
+                # --- AUTO REPLY LOGIC ---
+                try:
+                    # Only auto-reply to text messages for now
+                    if inbound_text:
+                        reply_text = auto_reply_for_text(inbound_text, profile_name=profile_name)
+                        if reply_text:
+                            # msg["from"] is the user's WhatsApp number
+                            do_send(msg.get("from"), kind="text", text=reply_text)
+                except Exception as e:
+                    print("Auto-reply failed:", e, flush=True)
     except Exception as e:
         print("Webhook parse error:", e, flush=True)
     return jsonify(status="ok"), 200
