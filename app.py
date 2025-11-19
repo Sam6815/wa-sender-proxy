@@ -327,11 +327,25 @@ def webhook_verify():
     return "forbidden", 403
 
 # ------- CHATBOT IMPLEMENTATION --------------
+# Bilingual ACK message (URL-encoded for quick links)
+ACK_MSG_EN_AR = (
+    "Thank you for contacting Al-Khawarizmi Group, your request is being processed and we will contact you shortly after. "
+    ".شكراً لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً"
+)
+ACK_MSG_EN_AR_ENC = urllib.parse.quote(ACK_MSG_EN_AR)
+
+# ---- Auto-reply toggle (global in-memory flag) ----
+AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "1") == "1"
+
 def auto_reply_for_text(text, profile_name=None):
     """
     Given the inbound text, return a reply string or None to skip auto-reply.
     Very simple rule-based example.
     """
+    # Respect global toggle
+    if not AUTO_REPLY_ENABLED:
+        return None
+
     if not text:
         return None
 
@@ -438,13 +452,6 @@ def webhook_inbound():
     return jsonify(status="ok"), 200
 
 # -------- UI (WhatsApp theme + tabs + scroll + badges + quick actions + BULK) --------
-# Bilingual ACK message (URL-encoded for quick links)
-ACK_MSG_EN_AR = (
-    "Thank you for contacting Al-Khawarizmi Group, your request is being processed and we will contact you shortly after. "
-    ".شكراً لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً"
-)
-ACK_MSG_EN_AR_ENC = urllib.parse.quote(ACK_MSG_EN_AR)
-
 INBOX_HTML = """
 <!doctype html><html lang="en"><head><meta charset="utf-8">
 <title>WhatsApp API Inbox - By Elite Dev.</title><meta name="viewport" content="width=device-width,initial-scale=1">
@@ -458,7 +465,7 @@ INBOX_HTML = """
  .topbar{background:var(--wa-dark);color:#fff;padding:14px 18px;display:flex;align-items:center;gap:12px;justify-content:space-between}
  .pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;background:#fff1;color:#fff;font-weight:600;letter-spacing:.2px}
  /* Optional: different color for the button pill */
- .pill-export {background: #0d6efd;   /* or your brand color */ color: #fff; text-decoration: none;}
+ .pill-export {background: #0d6efd; color: #fff; text-decoration: none;}
  .pill-export:hover {opacity: 0.9;}
  .tabs{display:flex;gap:8px;padding:10px;background:#fff;border-bottom:1px solid #eef2f7}
  .tab{padding:8px 14px;border-radius:10px;border:1px solid #e5e7eb;color:#334155;text-decoration:none}
@@ -499,6 +506,15 @@ INBOX_HTML = """
 <div class="topbar">
   <div class="pill">WhatsApp API Inbox - Al-Khawarizmi Group</div>
   <div class="righttools">
+    <form method="post" action="/toggle-autoreply?dir={{active_dir}}" style="display:inline">
+      <input type="hidden" name="enabled" value="{{ '0' if auto_reply_enabled else '1' }}">
+      <button type="submit" class="pill"
+              style="border:none; cursor:pointer;
+                     background: {{ '#16a34a' if auto_reply_enabled else '#6b7280' }};
+                     color:#fff;">
+        Auto-Reply: {{ 'ON' if auto_reply_enabled else 'OFF' }}
+      </button>
+    </form>
     <a href="/export.csv?dir={{active_dir}}" 
        class="pill pill-export" 
        title="Export CSV">
@@ -519,13 +535,26 @@ INBOX_HTML = """
     <form class="compose" method="post" action="/inbox/send">
       <div class="row" style="width:100%">
         <input name="to" placeholder="+9617xxxxxx" required style="min-width:220px">
-        <select name="kind"><option value="text" selected>Text</option><option value="template">Template</option></select>
+        <select name="kind">
+          <option value="text" selected>Text</option>
+          <option value="template">Template</option>
+        </select>
         <input name="tpl_name" placeholder="template name (if template)">
         <input name="tpl_lang" placeholder="en" value="en" style="width:72px">
+      </div>
+      <div class="row" style="width:100%">
+        <select name="header_type">
+          <option value="">Header: none</option>
+          <option value="image">Header: image URL</option>
+          <option value="video">Header: video URL</option>
+        </select>
+        <input name="header_url" placeholder="Header image/video URL (https://...)" style="flex:1">
         <button type="submit">Send</button>
       </div>
-      <textarea name="text" placeholder="Text body OR JSON array of template components"></textarea>
-      <div class="small">Tip: For templates, paste components JSON (optional). For text, body is used as-is.</div>
+      <textarea name="text" placeholder="Text body (for text) OR JSON components/parameters (advanced templates)"></textarea>
+      <div class="small">
+        For templates: choose header type + paste URL above for media headers. The textarea is optional for body variables / advanced JSON.
+      </div>
     </form>
 
     <!-- Bulk send -->
@@ -544,13 +573,21 @@ INBOX_HTML = """
             <input name="tpl_name" placeholder="hello_world1">
             <label class="small">Language</label>
             <input name="tpl_lang" value="en">
+            <label class="small">Header type</label>
+            <select name="header_type" style="width:100%">
+              <option value="">Header: none</option>
+              <option value="image">Header: image URL</option>
+              <option value="video">Header: video URL</option>
+            </select>
+            <label class="small">Header URL (image/video)</label>
+            <input name="header_url" placeholder="https://...">
             <label class="small">Concurrency</label>
             <input name="concurrency" value="5" type="number" min="1" max="20">
             <label class="small">Per-call sleep (sec)</label>
             <input name="sleep" value="0.1" type="number" step="0.01" min="0">
           </div>
         </div>
-        <textarea name="payload" placeholder='For template: components JSON array (optional). For text: message body.'></textarea>
+        <textarea name="payload" placeholder='For templates: optional JSON body parameters / full components. For text: message body.'></textarea>
         <button type="submit">Send Bulk</button>
         <div class="small">Note: Marketing/out-of-session must use approved templates.</div>
       </form>
@@ -670,27 +707,68 @@ def inbox():
     if active_dir not in {"in","out"}: active_dir = "in"
     base = request.url_root
     rows = _massage_messages(fetch_messages(200, direction=active_dir), base)
-    return render_template_string(INBOX_HTML, messages=rows, active_dir=active_dir, ack_msg_enc=ACK_MSG_EN_AR_ENC)
+    return render_template_string(
+        INBOX_HTML,
+        messages=rows,
+        active_dir=active_dir,
+        ack_msg_enc=ACK_MSG_EN_AR_ENC,
+        auto_reply_enabled=AUTO_REPLY_ENABLED,
+    )
 
 @app.post("/inbox/send")
 @require_basic_auth
 def inbox_send():
     to = request.form.get("to")
     kind = request.form.get("kind", "text")
-    text = (request.form.get("text") or "").strip()
+    raw_text = (request.form.get("text") or "").strip()
     tpl_name = request.form.get("tpl_name") or ""
     tpl_lang = request.form.get("tpl_lang") or "en"
+    header_type = (request.form.get("header_type") or "").strip().lower()
+    header_url = (request.form.get("header_url") or "").strip()
+
     try:
         if kind == "text":
-            do_send(to, kind="text", text=text)
+            # Simple text message
+            do_send(to, kind="text", text=raw_text)
         else:
-            comps = None
-            if text:
-                try: comps = json.loads(text)
-                except: comps = None
+            # TEMPLATE
+            components = None
+
+            # 1) Advanced mode: user pasted full components JSON in textarea
+            if raw_text:
+                try:
+                    loaded = json.loads(raw_text)
+                    if isinstance(loaded, list):
+                        components = loaded
+                    elif isinstance(loaded, dict):
+                        # allow a single component object
+                        components = [loaded]
+                except Exception:
+                    components = None
+
+            # 2) Simple mode: header_type + header_url → build header component
+            if components is None and header_type in ("image", "video") and header_url:
+                components = [
+                    {
+                        "type": "header",
+                        "parameters": [
+                            {
+                                "type": header_type,
+                                header_type: {
+                                    "link": header_url
+                                }
+                            }
+                        ]
+                    }
+                ]
+                # (Body variables can be added later via extra UI if you want.)
+
             tpl = {"name": tpl_name, "language": tpl_lang}
-            if comps: tpl["components"] = comps
+            if components:
+                tpl["components"] = components
+
             do_send(to, kind="template", template=tpl)
+
         return redirect(url_for('inbox', dir='out', sent='1'))
     except Exception as e:
         return redirect(url_for('inbox', dir='out', err=str(e)))
@@ -706,6 +784,8 @@ def inbox_bulk():
     tpl_lang = request.form.get("tpl_lang") or "en"
     sleep = request.form.get("sleep")
     conc = request.form.get("concurrency")
+    header_type = (request.form.get("header_type") or "").strip().lower()
+    header_url = (request.form.get("header_url") or "").strip()
 
     try:
         if kind == "text":
@@ -718,13 +798,41 @@ def inbox_bulk():
                 per_call_sleep=float(sleep or BULK_SLEEP_DEFAULT)
             )
         else:
-            comps = None
+            # TEMPLATE
             payload_str = (request.form.get("payload") or "").strip()
+            components = None
+
+            # 1) Advanced mode: full components JSON in payload textarea
             if payload_str:
-                try: comps = json.loads(payload_str)
-                except: comps = None
+                try:
+                    loaded = json.loads(payload_str)
+                    if isinstance(loaded, list):
+                        components = loaded
+                    elif isinstance(loaded, dict):
+                        components = [loaded]
+                except Exception:
+                    components = None
+
+            # 2) Simple mode: header_type + URL
+            if components is None and header_type in ("image", "video") and header_url:
+                components = [
+                    {
+                        "type": "header",
+                        "parameters": [
+                            {
+                                "type": header_type,
+                                header_type: {
+                                    "link": header_url
+                                }
+                            }
+                        ]
+                    }
+                ]
+
             tpl = {"name": tpl_name, "language": tpl_lang}
-            if comps: tpl["components"] = comps
+            if components:
+                tpl["components"] = components
+
             results = bulk_send(
                 numbers,
                 kind="template",
@@ -794,6 +902,18 @@ def quick():
         return redirect(url_for('inbox', dir=redir, sent='1'))
     except Exception as e:
         return redirect(url_for('inbox', dir=redir, err=str(e)))
+
+# ---- Auto-reply toggle route ----
+@app.post("/toggle-autoreply")
+@require_basic_auth
+def toggle_autoreply():
+    global AUTO_REPLY_ENABLED
+    enabled = request.form.get("enabled", "")
+    AUTO_REPLY_ENABLED = (enabled == "1")
+    redir_dir = request.args.get("dir") or "in"
+    if redir_dir not in {"in","out"}:
+        redir_dir = "in"
+    return redirect(url_for("inbox", dir=redir_dir))
 
 # ---- Favicon ----
 @app.route("/favicon.ico")
@@ -903,7 +1023,6 @@ def export_csv():
         f'attachment; filename="messages_{direction or "all"}.csv"'
     )
     return resp
-
 
 # ---- Live feed API (polling) ----
 @app.get("/api/messages")
