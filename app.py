@@ -504,7 +504,7 @@ INBOX_HTML = """
 </style></head>
 
 <div class="topbar">
-  <div class="pill">WhatsApp API Inbox - Al-Khawarizmi Group</div>
+  <div class="pill">WhatsApp API Inbox - Al-Khawarizmi Group/developed by Elite Dev.</div>
   <div class="righttools">
     <form method="post" action="/toggle-autoreply?dir={{active_dir}}" style="display:inline">
       <input type="hidden" name="enabled" value="{{ '0' if auto_reply_enabled else '1' }}">
