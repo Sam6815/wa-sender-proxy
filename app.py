@@ -440,8 +440,8 @@ def webhook_inbound():
 # -------- UI (WhatsApp theme + tabs + scroll + badges + quick actions + BULK) --------
 # Bilingual ACK message (URL-encoded for quick links)
 ACK_MSG_EN_AR = (
-    "Thank you for contacting Al-Khawarizmi Group — your request is being processed and we will contact you shortly after. "
-    "شكراً لتواصلكم مع مجموعة الخوارزمي — جارٍ معالجة طلبكم وسنتواصل معكم قريباً."
+    "Thank you for contacting Al-Khawarizmi Group, your request is being processed and we will contact you shortly after. "
+    ".شكراً لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً"
 )
 ACK_MSG_EN_AR_ENC = urllib.parse.quote(ACK_MSG_EN_AR)
 
@@ -457,6 +457,9 @@ INBOX_HTML = """
  .card{background:#fff;border-radius:12px;box-shadow:0 10px 24px rgba(0,0,0,.06);overflow:hidden;border:1px solid #eef2f7}
  .topbar{background:var(--wa-dark);color:#fff;padding:14px 18px;display:flex;align-items:center;gap:12px;justify-content:space-between}
  .pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;background:#fff1;color:#fff;font-weight:600;letter-spacing:.2px}
+ /* Optional: different color for the button pill */
+ .pill-export {background: #0d6efd;   /* or your brand color */ color: #fff; text-decoration: none;}
+ .pill-export:hover {opacity: 0.9;}
  .tabs{display:flex;gap:8px;padding:10px;background:#fff;border-bottom:1px solid #eef2f7}
  .tab{padding:8px 14px;border-radius:10px;border:1px solid #e5e7eb;color:#334155;text-decoration:none}
  .tab.active{background:var(--wa-green);color:#fff;border-color:var(--wa-green)}
@@ -496,9 +499,14 @@ INBOX_HTML = """
 <div class="topbar">
   <div class="pill">WhatsApp API Inbox - Al-Khawarizmi Group</div>
   <div class="righttools">
-    <a href="/export.csv?dir={{active_dir}}" title="Export CSV">Export CSV</a>
+    <a href="/export.csv?dir={{active_dir}}" 
+       class="pill pill-export" 
+       title="Export CSV">
+      Export CSV
+    </a>
   </div>
 </div>
+
 
 <div class="wrap">
   <div class="card">
@@ -844,23 +852,58 @@ def wa_media(media_id):
 @require_basic_auth
 def export_csv():
     direction = request.args.get("dir")
-    if direction not in {"in","out"}: direction = None
+    if direction not in {"in", "out"}:
+        direction = None
+
     rows = fetch_messages(2000, direction=direction)
-    buf = io.StringIO(); writer = csv.writer(buf)
-    writer.writerow(["id","created_at(GMT+2)","direction","wa_from","wa_to","wa_id","name","type","status","conversation_id","conversation_category","body"])
+
+    buf = io.StringIO()
+    # Write UTF-8 BOM so Excel correctly detects encoding (Arabic, etc.)
+    buf.write("\ufeff")
+
+    writer = csv.writer(buf)
+    writer.writerow([
+        "id",
+        "created_at(GMT+2)",
+        "direction",
+        "wa_from",
+        "wa_to",
+        "wa_id",
+        "name",
+        "type",
+        "status",
+        "conversation_id",
+        "conversation_category",
+        "body",
+    ])
+
     for m in rows:
+        body = (m.get("body") or "").replace("\n", " ").replace("\r", " ")
         writer.writerow([
-            m.get("id"), fmt_gmt2(m.get("created_at","")), m.get("direction"), m.get("wa_from"), m.get("wa_to"),
-            m.get("wa_id"), m.get("name"), m.get("type"), m.get("status"),
-            m.get("conversation_id"), m.get("conversation_category"),
-            (m.get("body") or "").replace("\n"," ").replace("\r"," ")
+            m.get("id"),
+            fmt_gmt2(m.get("created_at", "")),
+            m.get("direction"),
+            m.get("wa_from"),
+            m.get("wa_to"),
+            m.get("wa_id"),
+            m.get("name"),
+            m.get("type"),
+            m.get("status"),
+            m.get("conversation_id"),
+            m.get("conversation_category"),
+            body,
         ])
-    buf.seek(0)
-    return Response(
-        buf.read(),
-        mimetype="text/csv",
-        headers={"Content-Disposition": f'attachment; filename="messages_{direction or "all"}.csv"'}
+
+    data = buf.getvalue()
+    resp = Response(
+        data,
+        mimetype="text/csv; charset=utf-8",
     )
+    resp.headers["Content-Disposition"] = (
+        f'attachment; filename="messages_{direction or "all"}.csv"'
+    )
+    return resp
+
 
 # ---- Live feed API (polling) ----
 @app.get("/api/messages")
