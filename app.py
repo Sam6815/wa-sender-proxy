@@ -225,6 +225,24 @@ def badge_class(status_text: str) -> str:
         return "badge red"
     return "badge gray"
 
+# ---- Dynamic ACK builders (with optional profile_name) ----
+def build_ack_message(profile_name=None):
+    """
+    Build the bilingual ACK message, optionally including the profile name.
+    """
+    name_part = f" {profile_name}" if profile_name else ""
+    return (
+        f"Thank you{name_part} for contacting Al-Khawarizmi Group, your request is being processed "
+        f"and we will contact you shortly after. "
+        f".شكراً{name_part} لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً"
+    )
+
+def build_ack_message_encoded(profile_name=None):
+    """
+    URL-encoded version of the ACK (for quick-action links).
+    """
+    return urllib.parse.quote(build_ack_message(profile_name))
+
 def _massage_messages(rows, base_url):
     out = []
     base = (base_url or "").rstrip("/")
@@ -234,6 +252,13 @@ def _massage_messages(rows, base_url):
         m["preview"] = m.get("body") or ""
         m["media_link"] = None
         m["status_class"] = badge_class(m.get("status"))
+
+        # Per-row ACK (personalized)
+        profile_name = m.get("name")
+        ack_msg = build_ack_message(profile_name)
+        m["ack_msg"] = ack_msg
+        m["ack_msg_enc"] = build_ack_message_encoded(profile_name)
+
         t = (m.get("type") or "").lower()
         if t in {"image","audio","video","document","sticker"} and m.get("body"):
             try:
@@ -327,12 +352,6 @@ def webhook_verify():
     return "forbidden", 403
 
 # ------- CHATBOT IMPLEMENTATION --------------
-# Bilingual ACK message (URL-encoded for quick links)
-ACK_MSG_EN_AR = (
-    "Thank you for contacting Al-Khawarizmi Group, your request is being processed and we will contact you shortly after. "
-    ".شكراً لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً"
-)
-ACK_MSG_EN_AR_ENC = urllib.parse.quote(ACK_MSG_EN_AR)
 
 # ---- Auto-reply toggle (global in-memory flag) ----
 AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "1") == "1"
@@ -390,8 +409,8 @@ def auto_reply_for_text(text, profile_name=None):
             "Thank you for your patience."
         )
 
-    # Fallback to standard AUTO-REPLY
-    return ACK_MSG_EN_AR
+    # Fallback to standard AUTO-REPLY (personalized ACK)
+    return build_ack_message(profile_name)
 
 
 @app.post("/webhook")
@@ -624,7 +643,7 @@ INBOX_HTML = """
             <td class="qa">
               {% if m.direction == 'in' and m.wa_from %}
                 <a href="/quick?to={{m.wa_from}}&msg=%F0%9F%91%8D&redir={{active_dir}}">👍</a>
-                <a href="/quick?to={{m.wa_from}}&msg={{ack_msg_enc}}&redir={{active_dir}}">Auto-Reply</a>
+                <a href="/quick?to={{m.wa_from}}&msg={{m.ack_msg_enc}}&redir={{active_dir}}">Auto-Reply</a>
               {% elif m.direction == 'out' and m.wa_to %}
                 <a href="/quick?to={{m.wa_to}}&msg=Resending%20this.&redir={{active_dir}}">Resend</a>
               {% endif %}
@@ -675,13 +694,17 @@ INBOX_HTML = """
             <td>${m.type||''}</td>
             <td><span class="${m.status_class||'badge'}">${m.status||'—'}</span></td>
             <td class="mono" style="max-width:520px;white-space:pre-wrap">
-              ${m.media_link ? `<a href="${m.media_link}" target="_blank" rel="noopener">Download ${m.type}</a><div style="opacity:.75">${m.preview||''}</div>` : (m.preview||'')}
+              ${
+                m.media_link
+                  ? `<a href="${m.media_link}" target="_blank" rel="noopener">Download ${m.type}</a><div style="opacity:.75">${m.preview||''}</div>`
+                  : (m.preview||'')
+              }
             </td>
             <td class="qa">
               ${
                 m.direction==='in' && m.wa_from
                 ? `<a href="/quick?to=${encodeURIComponent(m.wa_from)}&msg=%F0%9F%91%8D&redir=${dir}">👍</a>
-                   <a href="/quick?to=${encodeURIComponent(m.wa_from)}&msg={{ack_msg_enc}}&redir=${dir}">Auto-Reply</a>`
+                   <a href="/quick?to=${encodeURIComponent(m.wa_from)}&msg=${m.ack_msg_enc || ''}&redir=${dir}">Auto-Reply</a>`
                 : (m.direction==='out' && m.wa_to
                    ? `<a href="/quick?to=${encodeURIComponent(m.wa_to)}&msg=Resending%20this.&redir=${dir}">Resend</a>`
                    : ``)
@@ -711,7 +734,6 @@ def inbox():
         INBOX_HTML,
         messages=rows,
         active_dir=active_dir,
-        ack_msg_enc=ACK_MSG_EN_AR_ENC,
         auto_reply_enabled=AUTO_REPLY_ENABLED,
     )
 
@@ -895,7 +917,10 @@ def bulk_api():
 @app.get("/quick")
 @require_basic_auth
 def quick():
-    to = request.args.get("to"); msg = request.args.get("msg", "👍")
+    to = request.args.get("to")
+    raw_msg = request.args.get("msg", "👍")
+    # Decode URL-encoded message (so 👍 and ACK render correctly)
+    msg = urllib.parse.unquote(raw_msg)
     redir = request.args.get("redir", "in")
     try:
         do_send(to, kind="text", text=msg)
@@ -979,7 +1004,7 @@ def export_csv():
 
     buf = io.StringIO()
     # Write UTF-8 BOM so Excel correctly detects encoding (Arabic, etc.)
-    buf.write("\ufeff")
+    buf.write("\\ufeff")
 
     writer = csv.writer(buf)
     writer.writerow([
@@ -998,7 +1023,7 @@ def export_csv():
     ])
 
     for m in rows:
-        body = (m.get("body") or "").replace("\n", " ").replace("\r", " ")
+        body = (m.get("body") or "").replace("\\n", " ").replace("\\r", " ")
         writer.writerow([
             m.get("id"),
             fmt_gmt2(m.get("created_at", "")),
