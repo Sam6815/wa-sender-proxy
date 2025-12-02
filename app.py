@@ -470,257 +470,873 @@ def webhook_inbound():
         print("Webhook parse error:", e, flush=True)
     return jsonify(status="ok"), 200
 
+@app.get("/api/contacts")
+@require_basic_auth
+def api_contacts():
+    """
+    Return a list of 'conversations' grouped by phone number
+    (like WhatsApp chat list).
+    """
+    base = request.url_root
+    # Get recent messages (in+out+status), newest first
+    rows = _massage_messages(fetch_messages(500, direction=None), base)
+
+    contacts_map = {}  # phone -> data
+    for m in rows:
+        direction = m.get("direction")
+        if direction not in ("in", "out"):
+            continue
+        phone = m.get("wa_from") if direction == "in" else m.get("wa_to")
+        if not phone:
+            continue
+
+        existing = contacts_map.get(phone)
+        if (not existing) or (m["id"] > existing["last_id"]):
+            contacts_map[phone] = {
+                "phone": phone,
+                "name": m.get("name") or "",
+                "last_preview": m.get("preview") or "",
+                "last_time": m.get("created_fmt") or m.get("created_at") or "",
+                "last_id": m["id"],
+                "last_direction": direction,
+            }
+
+    contacts = list(contacts_map.values())
+    # Sort by last_id desc → latest conversations on top
+    contacts.sort(key=lambda c: c["last_id"], reverse=True)
+    return jsonify(contacts)
+
+
+@app.get("/api/chat")
+@require_basic_auth
+def api_chat():
+    """
+    Return chat history for a specific phone number.
+    """
+    phone = request.args.get("phone")
+    if not phone:
+        return jsonify([])
+
+    base = request.url_root
+    rows = _massage_messages(fetch_messages(500, direction=None), base)
+
+    msgs = []
+    for m in rows:
+        direction = m.get("direction")
+        if direction not in ("in", "out"):
+            continue
+        peer = m.get("wa_from") if direction == "in" else m.get("wa_to")
+        if peer == phone:
+            msgs.append(m)
+
+    # Sort ascending by id → oldest at top, newest at bottom
+    msgs.sort(key=lambda x: x["id"])
+    return jsonify(msgs)
+
+
 # -------- UI (WhatsApp theme + tabs + scroll + badges + quick actions + BULK) --------
 INBOX_HTML = """
-<!doctype html><html lang="en"><head><meta charset="utf-8">
-<title>WhatsApp API Inbox - By Elite Dev.</title><meta name="viewport" content="width=device-width,initial-scale=1">
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WhatsApp API Inbox - Al-Khawarizmi Group</title>
+<meta name="viewport" content="width=device-width,initial-scale=1">
 <link rel="icon" href="/favicon.ico">
 <style>
- :root{ --wa-green:#25D366; --wa-dark:#075E54; --wa-light:#DCF8C6; --wa-bg:#f6f7f9; --text:#0f172a;
-        --blue:#3b82f6; --teal:#14b8a6; --green:#22c55e; --red:#ef4444; --gray:#64748b; }
- body{font-family:system-ui,Segoe UI,Roboto,Arial,sans-serif;margin:0;background:var(--wa-bg);color:var(--text)}
- .wrap{max-width:1200px;margin:0 auto;padding:20px}
- .card{background:#fff;border-radius:12px;box-shadow:0 10px 24px rgba(0,0,0,.06);overflow:hidden;border:1px solid #eef2f7}
- .topbar{background:var(--wa-dark);color:#fff;padding:14px 18px;display:flex;align-items:center;gap:12px;justify-content:space-between}
- .pill{display:inline-flex;align-items:center;gap:8px;padding:8px 12px;border-radius:999px;background:#fff1;color:#fff;font-weight:600;letter-spacing:.2px}
- /* Optional: different color for the button pill */
- .pill-export {background: #0d6efd; color: #fff; text-decoration: none;}
- .pill-export:hover {opacity: 0.9;}
- .tabs{display:flex;gap:8px;padding:10px;background:#fff;border-bottom:1px solid #eef2f7}
- .tab{padding:8px 14px;border-radius:10px;border:1px solid #e5e7eb;color:#334155;text-decoration:none}
- .tab.active{background:var(--wa-green);color:#fff;border-color:var(--wa-green)}
- .tab:hover{border-color:#cbd5e1}
- .righttools a{margin-left:10px;color:#334155;text-decoration:none}
- .righttools a:hover{color:#000}
- .compose{padding:16px;display:flex;flex-direction:column;gap:10px;background:#fff}
- .row{display:flex;gap:8px;flex-wrap:wrap}
- input,select,textarea,button{padding:.6rem .7rem;font:inherit;border:1px solid #d1d5db;border-radius:10px;outline:none}
- input:focus,select:focus,textarea:focus{border-color:var(--wa-green);box-shadow:0 0 0 3px rgba(37,211,102,.18)}
- button{background:var(--wa-green);color:#fff;border:1px solid var(--wa-green);cursor:pointer}
- button:hover{filter:brightness(.95)}
- textarea{width:100%;height:80px}
- .scrollwrap{max-height:70vh;overflow:auto;background:#fff}
- table{border-collapse:collapse;width:100%}
- th,td{border-bottom:1px solid #eef2f7;padding:10px 8px;text-align:left;vertical-align:top}
- thead th{position:sticky;top:0;background:#fff}
- .badge{display:inline-block;padding:.12rem .5rem;border-radius:999px;border:1px solid #c9eec2;background:var(--wa-light)}
- .badge.blue{background:#eff6ff;border-color:#bfdbfe;color:#1d4ed8}
- .badge.teal{background:#f0fdfa;border-color:#99f6e4;color:#0f766e}
- .badge.green{background:#ecfdf5;border-color:#a7f3d0;color:#065f46}
- .badge.red{background:#fef2f2;border-color:#fecaca;color:#991b1b}
- .badge.gray{background:#f1f5f9;border-color:#cbd5e1;color:#334155}
- .mono{font-family:ui-monospace,Menlo,Consolas,monospace}
- .qa a{display:inline-block;margin-right:8px;padding:.25rem .55rem;border-radius:8px;border:1px solid #e2e8f0;text-decoration:none;color:#0f172a;font-size:.9rem}
- .qa a:hover{background:#f8fafc}
- #toast{position:fixed;right:16px;bottom:16px;z-index:9999;display:none;background:#16a34a;color:#fff;padding:.6rem .8rem;border-radius:10px;box-shadow:0 6px 18px rgba(0,0,0,.2)}
- #toast.error{background:#dc2626}
-
+ :root{
+   --wa-green:#25D366;
+   --wa-dark:#075E54;
+   --wa-light:#DCF8C6;
+   --wa-bg:#111b21;
+   --wa-panel:#202c33;
+   --wa-panel-light:#202c33;
+   --wa-border:#1f2933;
+   --wa-text:#e9edef;
+   --wa-text-soft:#8696a0;
+   --blue:#3b82f6;
+   --red:#ef4444;
+ }
+ *{box-sizing:border-box}
+ body{
+   margin:0;
+   font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+   background:#0b141a;
+   color:var(--wa-text);
+ }
+ .topbar{
+   background:var(--wa-dark);
+   color:#fff;
+   padding:10px 16px;
+   display:flex;
+   align-items:center;
+   justify-content:space-between;
+   gap:10px;
+ }
+ .topbar-title{
+   font-weight:600;
+   font-size:14px;
+   display:flex;
+   align-items:center;
+   gap:8px;
+ }
+ .topbar-title span.logo-dot{
+   width:8px;height:8px;border-radius:999px;background:var(--wa-green);
+ }
+ .topbar-actions{
+   display:flex;
+   align-items:center;
+   gap:8px;
+ }
+ .pill-btn{
+   border-radius:999px;
+   padding:6px 10px;
+   border:none;
+   cursor:pointer;
+   font-size:12px;
+   display:inline-flex;
+   align-items:center;
+   gap:6px;
+ }
+ .pill-toggle{
+   background:#16a34a;
+   color:#fff;
+ }
+ .pill-toggle.off{
+   background:#6b7280;
+ }
+ .pill-export{
+   background:#0d6efd;
+   color:#fff;
+   text-decoration:none;
+ }
+ .outer-wrap{
+   height:calc(100vh - 46px);
+   display:flex;
+   justify-content:center;
+   align-items:stretch;
+   padding:12px;
+ }
+ .app{
+   width:100%;
+   max-width:1200px;
+   height:100%;
+   background:#111b21;
+   border-radius:8px;
+   overflow:hidden;
+   display:flex;
+   border:1px solid #1f2937;
+ }
+ .sidebar{
+   width:32%;
+   min-width:260px;
+   background:#111b21;
+   border-right:1px solid #202c33;
+   display:flex;
+   flex-direction:column;
+ }
+ .sidebar-header{
+   padding:8px;
+   background:#202c33;
+   display:flex;
+   flex-direction:column;
+   gap:6px;
+ }
+ .sidebar-header-title{
+   font-size:13px;
+   font-weight:600;
+ }
+ .sidebar-search{
+   position:relative;
+ }
+ .sidebar-search input{
+   width:100%;
+   padding:6px 26px 6px 10px;
+   border-radius:6px;
+   border:none;
+   outline:none;
+   font-size:12px;
+   background:#202c33;
+   color:var(--wa-text);
+ }
+ .sidebar-search input::placeholder{
+   color:var(--wa-text-soft);
+ }
+ .sidebar-search span.icon{
+   position:absolute;
+   right:8px;
+   top:50%;
+   transform:translateY(-50%);
+   font-size:12px;
+   color:var(--wa-text-soft);
+ }
+ .contact-list{
+   flex:1;
+   overflow-y:auto;
+   background:#111b21;
+ }
+ .contact{
+   padding:8px 10px;
+   display:flex;
+   gap:10px;
+   cursor:pointer;
+   border-bottom:1px solid #202c33;
+ }
+ .contact:hover{
+   background:#202c33;
+ }
+ .contact.active{
+   background:#202c33;
+ }
+ .contact-avatar{
+   width:32px;height:32px;border-radius:50%;
+   background:#202c33;
+   display:flex;align-items:center;justify-content:center;
+   font-size:14px;
+   color:var(--wa-text-soft);
+ }
+ .contact-main{
+   flex:1;
+   min-width:0;
+ }
+ .contact-row1{
+   display:flex;
+   justify-content:space-between;
+   gap:6px;
+   font-size:12px;
+ }
+ .contact-name{
+   font-weight:600;
+   white-space:nowrap;
+   overflow:hidden;
+   text-overflow:ellipsis;
+ }
+ .contact-time{
+   font-size:11px;
+   color:var(--wa-text-soft);
+ }
+ .contact-row2{
+   margin-top:2px;
+   font-size:11px;
+   color:var(--wa-text-soft);
+   white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+ }
+ .chat{
+   flex:1;
+   display:flex;
+   flex-direction:column;
+   background:#0b141a;
+ }
+ .chat-header{
+   padding:10px 12px;
+   background:#202c33;
+   border-bottom:1px solid #202c33;
+   display:flex;
+   justify-content:space-between;
+   align-items:center;
+   font-size:13px;
+ }
+ .chat-header-main{
+   display:flex;
+   flex-direction:column;
+ }
+ .chat-title{
+   font-weight:600;
+ }
+ .chat-subtitle{
+   font-size:11px;
+   color:var(--wa-text-soft);
+ }
+ .chat-empty{
+   flex:1;
+   display:flex;
+   align-items:center;
+   justify-content:center;
+   font-size:13px;
+   color:var(--wa-text-soft);
+   text-align:center;
+   padding:16px;
+ }
+ .chat-messages{
+   flex:1;
+   padding:12px;
+   background:#0a1014;
+   background-image:url("https://static.whatsapp.net/rsrc.php/v3/yz/r/11VDxZy0U6q.png");
+   background-size:400px;
+   overflow-y:auto;
+   display:flex;
+   flex-direction:column;
+   gap:4px;
+ }
+ .msg-row{
+   display:flex;
+   width:100%;
+   margin-bottom:2px;
+ }
+ .msg.in{
+   margin-right:auto;
+   background:#202c33;
+ }
+ .msg.out{
+   margin-left:auto;
+   background:var(--wa-light);
+   color:#111827;
+ }
+ .msg{
+   max-width:72%;
+   padding:6px 8px;
+   border-radius:10px;
+   font-size:13px;
+   position:relative;
+   white-space:pre-wrap;
+   word-wrap:break-word;
+ }
+ .msg-time{
+   font-size:10px;
+   opacity:.7;
+   margin-top:2px;
+   text-align:right;
+ }
+ .msg-media a{
+   color:#0ea5e9;
+   text-decoration:none;
+   font-size:12px;
+ }
+ .msg-media a:hover{text-decoration:underline;}
+ .chat-compose{
+   padding:8px;
+   background:#202c33;
+   border-top:1px solid #202c33;
+ }
+ .chat-compose form{
+   display:flex;
+   flex-direction:column;
+   gap:6px;
+ }
+ .compose-row{
+   display:flex;
+   gap:6px;
+   flex-wrap:wrap;
+ }
+ .compose-row > *{
+   font-size:12px;
+ }
+ .compose-row select,
+ .compose-row input{
+   padding:6px 8px;
+   border-radius:6px;
+   border:1px solid #374151;
+   outline:none;
+   background:#111827;
+   color:var(--wa-text);
+ }
+ .compose-row select:focus,
+ .compose-row input:focus,
+ .chat-textarea:focus{
+   border-color:var(--wa-green);
+ }
+ .chat-textarea{
+   width:100%;
+   padding:6px 8px;
+   border-radius:6px;
+   border:1px solid #374151;
+   background:#111827;
+   color:var(--wa-text);
+   font-size:12px;
+   min-height:60px;
+   resize:vertical;
+ }
+ .send-btn{
+   align-self:flex-end;
+   background:var(--wa-green);
+   border:none;
+   color:#111827;
+   padding:6px 14px;
+   border-radius:999px;
+   font-weight:600;
+   cursor:pointer;
+   font-size:12px;
+ }
+ .send-btn:hover{
+   filter:brightness(.95);
+ }
+ .small{font-size:11px;color:var(--wa-text-soft);}
  /* Bulk panel */
- .bulk{padding:16px;border-top:1px dashed #e5e7eb;background:#fff}
- .bulk h3{margin:.2rem 0 10px 0;font-size:1rem;color:#0f172a}
- .bulk .row > *{flex:1 1 220px}
- .small{font-size:.85rem;color:#64748b}
-</style></head>
+ .bulk-panel{
+   background:#111b21;
+   border-top:1px solid #202c33;
+   padding:10px 12px;
+   font-size:12px;
+ }
+ details.bulk{
+   background:#111827;
+   border-radius:6px;
+   padding:8px 10px;
+   border:1px solid #1f2937;
+ }
+ details.bulk summary{
+   list-style:none;
+   cursor:pointer;
+   display:flex;
+   justify-content:space-between;
+   align-items:center;
+   font-size:12px;
+ }
+ details.bulk summary::-webkit-details-marker{display:none;}
+ .bulk form{
+   margin-top:8px;
+   display:flex;
+   flex-direction:column;
+   gap:6px;
+ }
+ .bulk-row{
+   display:flex;
+   gap:8px;
+   flex-wrap:wrap;
+ }
+ .bulk-row textarea{
+   flex:1;
+   min-width:220px;
+   min-height:80px;
+ }
+ .bulk-row textarea,
+ .bulk input,
+ .bulk select,
+ .bulk textarea{
+   padding:6px 8px;
+   border-radius:6px;
+   border:1px solid #374151;
+   background:#020617;
+   color:var(--wa-text);
+   font-size:12px;
+ }
+ .bulk button{
+   background:#22c55e;
+   border:none;
+   color:#022c22;
+   padding:6px 10px;
+   border-radius:999px;
+   font-weight:600;
+   cursor:pointer;
+   font-size:12px;
+   align-self:flex-start;
+ }
+ .bulk button:hover{
+   filter:brightness(.96);
+ }
+ #toast{
+   position:fixed;
+   right:16px;
+   bottom:16px;
+   padding:8px 12px;
+   border-radius:8px;
+   font-size:12px;
+   background:#16a34a;
+   color:#fff;
+   display:none;
+   z-index:9999;
+ }
+ #toast.error{background:#dc2626;}
+ @media(max-width:900px){
+   .app{flex-direction:column;}
+   .sidebar{width:100%;height:40%;border-right:none;border-bottom:1px solid #202c33;}
+   .chat{height:60%;}
+ }
+</style>
+</head>
+<body>
 
 <div class="topbar">
-  <div class="pill">WhatsApp API Inbox - Al-Khawarizmi Group/developed by Elite Dev.</div>
-  <div class="righttools">
-    <form method="post" action="/toggle-autoreply?dir={{active_dir}}" style="display:inline">
+  <div class="topbar-title">
+    <span class="logo-dot"></span>
+    <span>Al-Khawarizmi WhatsApp Inbox</span>
+  </div>
+  <div class="topbar-actions">
+    <form method="post" action="/toggle-autoreply?dir={{active_dir}}" style="margin:0">
       <input type="hidden" name="enabled" value="{{ '0' if auto_reply_enabled else '1' }}">
-      <button type="submit" class="pill"
-              style="border:none; cursor:pointer;
-                     background: {{ '#16a34a' if auto_reply_enabled else '#6b7280' }};
-                     color:#fff;">
+      <button type="submit"
+              class="pill-btn pill-toggle {% if not auto_reply_enabled %}off{% endif %}">
         Auto-Reply: {{ 'ON' if auto_reply_enabled else 'OFF' }}
       </button>
     </form>
-    <a href="/export.csv?dir={{active_dir}}" 
-       class="pill pill-export" 
-       title="Export CSV">
+    <a href="/export.csv?dir=in" class="pill-btn pill-export" title="Export inbox as CSV">
       Export CSV
     </a>
   </div>
 </div>
 
-
-<div class="wrap">
-  <div class="card">
-    <div class="tabs">
-      <a class="tab {% if active_dir == 'in' %}active{% endif %}" href="/inbox?dir=in">Inbox</a>
-      <a class="tab {% if active_dir == 'out' %}active{% endif %}" href="/inbox?dir=out">Sent</a>
+<div class="outer-wrap">
+  <div class="app">
+    <!-- Sidebar / chat list -->
+    <div class="sidebar">
+      <div class="sidebar-header">
+        <div class="sidebar-header-title">Chats</div>
+        <div class="sidebar-search">
+          <input id="searchInput" placeholder="Search name or number">
+          <span class="icon">🔍</span>
+        </div>
+      </div>
+      <div id="contactList" class="contact-list"></div>
     </div>
 
-    <!-- Single send -->
-    <form class="compose" method="post" action="/inbox/send">
-      <div class="row" style="width:100%">
-        <input name="to" placeholder="+9617xxxxxx" required style="min-width:220px">
-        <select name="kind">
-          <option value="text" selected>Text</option>
-          <option value="template">Template</option>
-        </select>
-        <input name="tpl_name" placeholder="template name (if template)">
-        <input name="tpl_lang" placeholder="en" value="en" style="width:72px">
+    <!-- Chat panel -->
+    <div class="chat">
+      <div class="chat-header">
+        <div class="chat-header-main">
+          <div id="chatTitle" class="chat-title">Select a chat</div>
+          <div id="chatSubtitle" class="chat-subtitle">Incoming messages will appear here</div>
+        </div>
       </div>
-      <div class="row" style="width:100%">
-        <select name="header_type">
-          <option value="">Header: none</option>
-          <option value="image">Header: image URL</option>
-          <option value="video">Header: video URL</option>
-        </select>
-        <input name="header_url" placeholder="Header image/video URL (https://...)" style="flex:1">
-        <button type="submit">Send</button>
-      </div>
-      <textarea name="text" placeholder="Text body (for text) OR JSON components/parameters (advanced templates)"></textarea>
-      <div class="small">
-        For templates: choose header type + paste URL above for media headers. The textarea is optional for body variables / advanced JSON.
-      </div>
-    </form>
 
-    <!-- Bulk send -->
-    <div class="bulk">
-      <h3>Bulk Send</h3>
-      <form method="post" action="/inbox/bulk">
-        <div class="row" style="width:100%">
-          <textarea name="numbers" placeholder="One number per line (e.g. +9617xxxxxx)" style="height:120px" required></textarea>
-          <div style="min-width:280px">
-            <label class="small">Kind</label>
-            <select name="kind" style="width:100%">
-              <option value="template" selected>Template (recommended)</option>
-              <option value="text">Text (24h service window)</option>
+      <div id="chatEmpty" class="chat-empty">
+        Select a contact from the left panel to start chatting.<br>
+        You can still use Bulk Send at the bottom for campaigns.
+      </div>
+      <div id="chatMessages" class="chat-messages" style="display:none;"></div>
+
+      <div class="chat-compose">
+        <form id="chatSendForm">
+          <input type="hidden" id="chatPhone">
+          <div class="compose-row">
+            <select id="chatKind">
+              <option value="text">Text</option>
+              <option value="template">Template</option>
             </select>
-            <label class="small">Template name</label>
-            <input name="tpl_name" placeholder="hello_world1">
-            <label class="small">Language</label>
-            <input name="tpl_lang" value="en">
-            <label class="small">Header type</label>
-            <select name="header_type" style="width:100%">
+            <input id="tplName" placeholder="template name (if template)">
+            <input id="tplLang" placeholder="en" value="en" style="max-width:60px">
+            <select id="headerType">
               <option value="">Header: none</option>
               <option value="image">Header: image URL</option>
               <option value="video">Header: video URL</option>
             </select>
-            <label class="small">Header URL (image/video)</label>
-            <input name="header_url" placeholder="https://...">
-            <label class="small">Concurrency</label>
-            <input name="concurrency" value="5" type="number" min="1" max="20">
-            <label class="small">Per-call sleep (sec)</label>
-            <input name="sleep" value="0.1" type="number" step="0.01" min="0">
+            <input id="headerUrl" placeholder="https:// header media URL" style="flex:1;min-width:120px">
           </div>
-        </div>
-        <textarea name="payload" placeholder='For templates: optional JSON body parameters / full components. For text: message body.'></textarea>
-        <button type="submit">Send Bulk</button>
-        <div class="small">Note: Marketing/out-of-session must use approved templates.</div>
-      </form>
-    </div>
+          <textarea id="chatText" class="chat-textarea"
+            placeholder="Type a message (for text) OR JSON components for advanced templates."></textarea>
+          <div class="small">
+            For templates: you can paste components JSON or just choose a header type + URL above for media headers.
+          </div>
+          <button type="submit" class="send-btn">Send</button>
+        </form>
+      </div>
 
-    <div id="toast"></div>
-
-    <div class="scrollwrap">
-      <table id="tbl">
-        <thead>
-          <tr>
-            <th>When</th><th>Dir</th><th>From</th><th>To</th><th>Name</th>
-            <th>Type</th><th>Status</th><th>Body / Media</th><th>Quick</th>
-          </tr>
-        </thead>
-        <tbody id="tbody">
-        {% for m in messages %}
-          <tr data-id="{{m.id}}">
-            <td>{{m.created_fmt}}</td>
-            <td><span class="badge">{{m.direction}}</span></td>
-            <td>{{m.wa_from or ""}}</td>
-            <td>{{m.wa_to or ""}}</td>
-            <td>{{m.name or ""}}</td>
-            <td>{{m.type}}</td>
-            <td><span class="{{m.status_class}}">{{m.status or "—"}}</span></td>
-            <td class="mono" style="max-width:520px;white-space:pre-wrap">
-              {% if m.media_link %}
-                <a href="{{m.media_link}}" target="_blank" rel="noopener">Download {{m.type}}</a>
-                <div style="opacity:.75">{{m.preview}}</div>
-              {% else %}
-                {{m.preview}}
-              {% endif %}
-            </td>
-            <td class="qa">
-              {% if m.direction == 'in' and m.wa_from %}
-                <a href="/quick?to={{m.wa_from}}&msg=%F0%9F%91%8D&redir={{active_dir}}">👍</a>
-                <a href="/quick?to={{m.wa_from}}&msg={{m.ack_msg_enc}}&redir={{active_dir}}">Auto-Reply</a>
-              {% elif m.direction == 'out' and m.wa_to %}
-                <a href="/quick?to={{m.wa_to}}&msg=Resending%20this.&redir={{active_dir}}">Resend</a>
-              {% endif %}
-            </td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
+      <!-- Bulk panel -->
+      <div class="bulk-panel">
+        <details class="bulk">
+          <summary>
+            <span>Bulk Send (templates / text)</span>
+            <span class="small">Click to expand</span>
+          </summary>
+          <form method="post" action="/inbox/bulk">
+            <div class="bulk-row">
+              <textarea name="numbers" placeholder="One number per line (e.g. +9617xxxxxx)" required></textarea>
+              <div style="min-width:220px;display:flex;flex-direction:column;gap:4px;">
+                <label class="small">Kind</label>
+                <select name="kind">
+                  <option value="template" selected>Template (recommended)</option>
+                  <option value="text">Text (24h window)</option>
+                </select>
+                <label class="small">Template name</label>
+                <input name="tpl_name" placeholder="hello_world1">
+                <label class="small">Language</label>
+                <input name="tpl_lang" value="en">
+                <label class="small">Header type</label>
+                <select name="header_type">
+                  <option value="">Header: none</option>
+                  <option value="image">Header: image URL</option>
+                  <option value="video">Header: video URL</option>
+                </select>
+                <label class="small">Header URL</label>
+                <input name="header_url" placeholder="https://...">
+                <label class="small">Concurrency</label>
+                <input name="concurrency" value="5" type="number" min="1" max="20">
+                <label class="small">Per-call sleep (sec)</label>
+                <input name="sleep" value="0.1" type="number" step="0.01" min="0">
+              </div>
+            </div>
+            <textarea name="payload"
+              placeholder='For templates: optional JSON components body. For text: message body.'></textarea>
+            <button type="submit">Send Bulk</button>
+            <div class="small">Note: Marketing/out-of-session must use approved templates.</div>
+          </form>
+        </details>
+      </div>
     </div>
   </div>
 </div>
 
+<div id="toast"></div>
+
 <script>
 (function(){
-  const params = new URLSearchParams(location.search);
-  const ok = params.get('sent'); const err = params.get('err');
-  const toast = document.getElementById('toast');
-  function show(msg, isErr){
-    toast.textContent = msg; toast.className = isErr ? 'error' : '';
-    toast.style.display = 'block'; setTimeout(()=>{ toast.style.display='none'; }, 1800);
-  }
-  if(ok==='1'){ show('Message sent ✓', false); }
-  if(err){ show('Failed: ' + err, true); }
+  let contacts = [];
+  let activePhone = null;
 
-  // live polling every ~5s
-  const dir = (new URLSearchParams(location.search).get('dir')) || 'in';
-  const tbody = document.getElementById('tbody');
-  function currentTopId(){
-    const tr = tbody.querySelector('tr[data-id]');
-    return tr ? parseInt(tr.getAttribute('data-id')) : 0;
+  const contactListEl = document.getElementById('contactList');
+  const searchInput = document.getElementById('searchInput');
+  const chatTitleEl = document.getElementById('chatTitle');
+  const chatSubtitleEl = document.getElementById('chatSubtitle');
+  const chatEmptyEl = document.getElementById('chatEmpty');
+  const chatMessagesEl = document.getElementById('chatMessages');
+
+  const chatPhoneInput = document.getElementById('chatPhone');
+  const chatKind = document.getElementById('chatKind');
+  const tplName = document.getElementById('tplName');
+  const tplLang = document.getElementById('tplLang');
+  const headerType = document.getElementById('headerType');
+  const headerUrl = document.getElementById('headerUrl');
+  const chatText = document.getElementById('chatText');
+  const chatSendForm = document.getElementById('chatSendForm');
+
+  const toast = document.getElementById('toast');
+  function showToast(msg, isErr){
+    toast.textContent = msg;
+    toast.className = isErr ? 'error' : '';
+    toast.style.display = 'block';
+    setTimeout(()=>{ toast.style.display='none'; },1800);
   }
-  async function poll(){
+
+  async function fetchJSON(url){
+    const r = await fetch(url);
+    if(!r.ok) throw new Error('HTTP '+r.status);
+    return await r.json();
+  }
+
+  function renderContacts(list){
+    contactListEl.innerHTML = '';
+    list.forEach(c=>{
+      const div = document.createElement('div');
+      div.className = 'contact';
+      div.dataset.phone = c.phone;
+
+      const avatar = document.createElement('div');
+      avatar.className = 'contact-avatar';
+      const initials = (c.name || c.phone || '?').toString().trim()[0] || '?';
+      avatar.textContent = initials.toUpperCase();
+
+      const main = document.createElement('div');
+      main.className = 'contact-main';
+
+      const row1 = document.createElement('div');
+      row1.className = 'contact-row1';
+      const name = document.createElement('div');
+      name.className = 'contact-name';
+      name.textContent = c.name || c.phone;
+      const time = document.createElement('div');
+      time.className = 'contact-time';
+      time.textContent = c.last_time || '';
+      row1.appendChild(name);
+      row1.appendChild(time);
+
+      const row2 = document.createElement('div');
+      row2.className = 'contact-row2';
+      row2.textContent = c.last_preview || '';
+
+      main.appendChild(row1);
+      main.appendChild(row2);
+
+      div.appendChild(avatar);
+      div.appendChild(main);
+
+      div.addEventListener('click', ()=>{
+        setActiveContact(c.phone, c.name, div);
+      });
+
+      contactListEl.appendChild(div);
+    });
+  }
+
+  function setActiveContact(phone, name, element){
+    activePhone = phone;
+    chatPhoneInput.value = phone;
+
+    Array.from(contactListEl.querySelectorAll('.contact')).forEach(el=>{
+      el.classList.toggle('active', el === element);
+    });
+
+    chatTitleEl.textContent = name || phone;
+    chatSubtitleEl.textContent = phone;
+    loadChat(phone);
+  }
+
+  async function loadContacts(){
     try{
-      const since = currentTopId();
-      const res = await fetch(`/api/messages?dir=${encodeURIComponent(dir)}&since_id=${since}`);
-      if(!res.ok) return;
-      const items = await res.json(); // newest first
-      if(items.length){
-        for(const m of items){
-          const tr = document.createElement('tr');
-          tr.setAttribute('data-id', m.id);
-          tr.innerHTML = `
-            <td>${m.created_fmt || m.created_at || ''}</td>
-            <td><span class="badge">${m.direction||''}</span></td>
-            <td>${m.wa_from||''}</td>
-            <td>${m.wa_to||''}</td>
-            <td>${m.name||''}</td>
-            <td>${m.type||''}</td>
-            <td><span class="${m.status_class||'badge'}">${m.status||'—'}</span></td>
-            <td class="mono" style="max-width:520px;white-space:pre-wrap">
-              ${
-                m.media_link
-                  ? `<a href="${m.media_link}" target="_blank" rel="noopener">Download ${m.type}</a><div style="opacity:.75">${m.preview||''}</div>`
-                  : (m.preview||'')
-              }
-            </td>
-            <td class="qa">
-              ${
-                m.direction==='in' && m.wa_from
-                ? `<a href="/quick?to=${encodeURIComponent(m.wa_from)}&msg=%F0%9F%91%8D&redir=${dir}">👍</a>
-                   <a href="/quick?to=${encodeURIComponent(m.wa_from)}&msg=${m.ack_msg_enc || ''}&redir=${dir}">Auto-Reply</a>`
-                : (m.direction==='out' && m.wa_to
-                   ? `<a href="/quick?to=${encodeURIComponent(m.wa_to)}&msg=Resending%20this.&redir=${dir}">Resend</a>`
-                   : ``)
-              }
-            </td>`;
-          tbody.insertBefore(tr, tbody.firstChild);
+      const data = await fetchJSON('/api/contacts');
+      contacts = data || [];
+      applyFilter();
+      // Auto-select first contact
+      if(contacts.length && !activePhone){
+        const first = contacts[0];
+        const firstEl = contactListEl.querySelector('.contact');
+        if(first && firstEl){
+          setActiveContact(first.phone, first.name, firstEl);
         }
-        show(`+${items.length} new`, false);
       }
-    }catch(e){ /* silent */ }
+    }catch(e){
+      console.error('contacts error', e);
+    }
   }
-  setInterval(poll, 5000);
+
+  function applyFilter(){
+    const q = (searchInput.value || '').toLowerCase();
+    if(!q){
+      renderContacts(contacts);
+      return;
+    }
+    const filtered = contacts.filter(c=>{
+      const txt = (c.name || '') + ' ' + (c.phone || '');
+      return txt.toLowerCase().includes(q);
+    });
+    renderContacts(filtered);
+  }
+
+  searchInput.addEventListener('input', applyFilter);
+
+  async function loadChat(phone){
+    if(!phone) return;
+    try{
+      const msgs = await fetchJSON('/api/chat?phone=' + encodeURIComponent(phone));
+      chatMessagesEl.innerHTML = '';
+      if(!msgs.length){
+        chatEmptyEl.style.display = 'flex';
+        chatMessagesEl.style.display = 'none';
+        return;
+      }
+      chatEmptyEl.style.display = 'none';
+      chatMessagesEl.style.display = 'flex';
+
+      msgs.forEach(m=>{
+        const row = document.createElement('div');
+        row.className = 'msg-row';
+
+        const bubble = document.createElement('div');
+        const dir = m.direction === 'out' ? 'out' : 'in';
+        bubble.className = 'msg ' + dir;
+
+        if(m.media_link){
+          const mediaDiv = document.createElement('div');
+          mediaDiv.className = 'msg-media';
+          mediaDiv.innerHTML =
+            '<a href="'+m.media_link+'" target="_blank" rel="noopener">Download ' +
+            (m.type || 'media') + '</a>';
+          if(m.preview){
+            const caption = document.createElement('div');
+            caption.textContent = m.preview;
+            caption.style.marginTop = '2px';
+            mediaDiv.appendChild(caption);
+          }
+          bubble.appendChild(mediaDiv);
+        }else{
+          bubble.textContent = m.preview || '';
+        }
+
+        const time = document.createElement('div');
+        time.className = 'msg-time';
+        time.textContent = m.created_fmt || m.created_at || '';
+        bubble.appendChild(time);
+
+        row.appendChild(bubble);
+        chatMessagesEl.appendChild(row);
+      });
+
+      chatMessagesEl.scrollTop = chatMessagesEl.scrollHeight;
+    }catch(e){
+      console.error('chat error', e);
+    }
+  }
+
+  chatSendForm.addEventListener('submit', async (ev)=>{
+    ev.preventDefault();
+    if(!activePhone){
+      showToast('Select a chat first', true);
+      return;
+    }
+    const kind = chatKind.value || 'text';
+    const text = (chatText.value || '').trim();
+    const name = tplName.value.trim();
+    const lang = tplLang.value.trim() || 'en';
+    const hType = (headerType.value || '').trim().toLowerCase();
+    const hUrl = (headerUrl.value || '').trim();
+
+    let payload = { to: activePhone, kind: kind };
+
+    if(kind === 'text'){
+      if(!text){
+        showToast('Enter a message', true);
+        return;
+      }
+      payload.text = text;
+    }else{
+      if(!name){
+        showToast('Template name is required', true);
+        return;
+      }
+      let template = { name: name, language: lang };
+      let components = null;
+
+      if(text){
+        try{
+          const parsed = JSON.parse(text);
+          if(Array.isArray(parsed)){
+            components = parsed;
+          }else if(parsed && typeof parsed === 'object'){
+            components = [parsed];
+          }
+        }catch(e){
+          // ignore parse error – fall back to header only
+        }
+      }
+
+      if(!components && hType && hUrl){
+        components = [
+          {
+            type:'header',
+            parameters:[
+              {
+                type:hType,
+                [hType]:{ link:hUrl }
+              }
+            ]
+          }
+        ];
+      }
+
+      if(components){
+        template.components = components;
+      }
+      payload.template = template;
+    }
+
+    try{
+      const res = await fetch('/send', {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if(!res.ok || data.error){
+        throw new Error(data.error || ('HTTP '+res.status));
+      }
+      chatText.value = '';
+      showToast('Message sent ✓', false);
+      // reload chat to show latest
+      setTimeout(()=>{ loadChat(activePhone); loadContacts(); },400);
+    }catch(e){
+      console.error('send error', e);
+      showToast('Failed: ' + e.message, true);
+    }
+  });
+
+  // Initial load + polling
+  loadContacts();
+  setInterval(loadContacts, 8000);
 })();
 </script>
+
+</body>
 </html>
 """
+
 
 # ---- Routes for Inbox UI ----
 @app.get("/inbox")
