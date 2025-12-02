@@ -34,8 +34,8 @@ PROTECT_MEDIA = os.getenv("PROTECT_MEDIA", "0") == "1"
 DATABASE_URL = os.getenv("DATABASE_URL") or ""  # database url on render
 
 # Bulk defaults
-BULK_CONCURRENCY_DEFAULT = int(os.getenv("BULK_CONCURRENCY", "3"))
-BULK_SLEEP_DEFAULT = float(os.getenv("BULK_PER_CALL_SLEEP", "0.3"))  # 0.1s 
+BULK_CONCURRENCY_DEFAULT = int(os.getenv("BULK_CONCURRENCY", "5"))
+BULK_SLEEP_DEFAULT = float(os.getenv("BULK_PER_CALL_SLEEP", "0.1"))  # 0.1s 
 BULK_MAX_RETRIES = int(os.getenv("BULK_MAX_RETRIES", "2"))
 
 APP_DIR = Path(__file__).resolve().parent
@@ -233,10 +233,9 @@ def build_ack_message(profile_name=None):
     name_part = f" {profile_name}" if profile_name else ""
     return (
         f"Thank you {name_part} for contacting Al-Khawarizmi Group, your request is being processed "
-        f"and we will contact you shortly after.\n"
-        f"\n"
+        f"and we will contact you shortly after.\n\n"
         f"{name_part} شكراً\n"
-        f".لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً\n"            # recent edits on arabic version
+        f"لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً\n"            # recent edits on arabic version
     )
 
 def build_ack_message_encoded(profile_name=None):
@@ -356,7 +355,7 @@ def webhook_verify():
 # ------- CHATBOT IMPLEMENTATION --------------
 
 # ---- Auto-reply toggle (global in-memory flag) ----
-AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "1") == "1"
+AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "0") == "1"                             # autoreply defaults is off
 
 def auto_reply_for_text(text, profile_name=None):
     """
