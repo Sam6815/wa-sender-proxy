@@ -31,11 +31,11 @@ INBOX_PASS = os.getenv("INBOX_PASS")              # enable auth when set
 PROTECT_MEDIA = os.getenv("PROTECT_MEDIA", "0") == "1"
 
 # DB (Postgres on Render, SQLite locally)
-DATABASE_URL = os.getenv("DATABASE_URL") or ""  # e.g. postgres://user:pass@host:5432/dbname
+DATABASE_URL = os.getenv("DATABASE_URL") or ""  # database url on render
 
 # Bulk defaults
-BULK_CONCURRENCY_DEFAULT = int(os.getenv("BULK_CONCURRENCY", "5"))
-BULK_SLEEP_DEFAULT = float(os.getenv("BULK_PER_CALL_SLEEP", "0.1"))  # 0.1s per your request
+BULK_CONCURRENCY_DEFAULT = int(os.getenv("BULK_CONCURRENCY", "3"))
+BULK_SLEEP_DEFAULT = float(os.getenv("BULK_PER_CALL_SLEEP", "0.3"))  # 0.1s 
 BULK_MAX_RETRIES = int(os.getenv("BULK_MAX_RETRIES", "2"))
 
 APP_DIR = Path(__file__).resolve().parent
@@ -232,9 +232,10 @@ def build_ack_message(profile_name=None):
     """
     name_part = f" {profile_name}" if profile_name else ""
     return (
-        f"Thank you{name_part} for contacting Al-Khawarizmi Group, your request is being processed "
-        f"and we will contact you shortly after. "
-        f".شكراً{name_part} لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً"
+        f"Thank you {name_part} for contacting Al-Khawarizmi Group, your request is being processed "
+        f"and we will contact you shortly after.\n"
+        f".{name_part}شكراً\n"
+        f"لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً\n"            # recent edits on arabic version
     )
 
 def build_ack_message_encoded(profile_name=None):
