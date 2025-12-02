@@ -537,7 +537,7 @@ def api_chat():
 # -------- UI (WhatsApp theme + tabs + scroll + badges + quick actions + BULK) --------
 INBOX_HTML = """
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
 <head>
 <meta charset="utf-8">
 <title>WhatsApp API Inbox - Al-Khawarizmi Group</title>
@@ -548,20 +548,56 @@ INBOX_HTML = """
    --wa-green:#25D366;
    --wa-dark:#075E54;
    --wa-light:#DCF8C6;
-   --wa-bg:#111b21;
-   --wa-panel:#202c33;
-   --wa-panel-light:#202c33;
-   --wa-border:#1f2933;
+
+   /* DARK defaults */
+   --page-bg:#0b141a;
+   --app-bg:#111b21;
+   --sidebar-bg:#111b21;
+   --sidebar-header-bg:#202c33;
+   --chat-bg:#0b141a;
+   --chat-panel-bg:#202c33;
+   --chat-messages-bg:#0a1014;
+   --bulk-panel-bg:#111b21;
+   --bulk-inner-bg:#111827;
+   --input-bg:#111827;
+   --border-strong:#202c33;
+   --border-soft:#1f2937;
+   --input-border:#374151;
+
    --wa-text:#e9edef;
    --wa-text-soft:#8696a0;
    --blue:#3b82f6;
    --red:#ef4444;
  }
+
+ /* LIGHT theme overrides */
+ [data-theme="light"]{
+   --wa-dark:#008069;
+   --wa-light:#e7ffdb;
+
+   --page-bg:#e5ddd5;
+   --app-bg:#ffffff;
+   --sidebar-bg:#ffffff;
+   --sidebar-header-bg:#f0f2f5;
+   --chat-bg:#e5ddd5;
+   --chat-panel-bg:#f0f2f5;
+   --chat-messages-bg:#efeae2;
+   --bulk-panel-bg:#f0f2f5;
+   --bulk-inner-bg:#ffffff;
+   --input-bg:#ffffff;
+   --border-strong:#d1d5db;
+   --border-soft:#e5e7eb;
+   --input-border:#d1d5db;
+
+   --wa-text:#111827;
+   --wa-text-soft:#6b7280;
+ }
+
  *{box-sizing:border-box}
  body{
    margin:0;
    font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
-   background:#0b141a;
+   background:var(--page-bg);
    color:var(--wa-text);
  }
  .topbar{
@@ -610,6 +646,15 @@ INBOX_HTML = """
    color:#fff;
    text-decoration:none;
  }
+ .pill-theme{
+   background:rgba(15,23,42,0.2);
+   color:#e5e7eb;
+   border:1px solid rgba(15,23,42,0.4);
+ }
+ .pill-theme:hover{
+   filter:brightness(1.1);
+ }
+
  .outer-wrap{
    height:calc(100vh - 46px);
    display:flex;
@@ -621,23 +666,23 @@ INBOX_HTML = """
    width:100%;
    max-width:1200px;
    height:100%;
-   background:#111b21;
+   background:var(--app-bg);
    border-radius:8px;
    overflow:hidden;
    display:flex;
-   border:1px solid #1f2937;
+   border:1px solid var(--border-soft);
  }
  .sidebar{
    width:32%;
    min-width:260px;
-   background:#111b21;
-   border-right:1px solid #202c33;
+   background:var(--sidebar-bg);
+   border-right:1px solid var(--border-strong);
    display:flex;
    flex-direction:column;
  }
  .sidebar-header{
    padding:8px;
-   background:#202c33;
+   background:var(--sidebar-header-bg);
    display:flex;
    flex-direction:column;
    gap:6px;
@@ -656,7 +701,7 @@ INBOX_HTML = """
    border:none;
    outline:none;
    font-size:12px;
-   background:#202c33;
+   background:var(--input-bg);
    color:var(--wa-text);
  }
  .sidebar-search input::placeholder{
@@ -673,24 +718,24 @@ INBOX_HTML = """
  .contact-list{
    flex:1;
    overflow-y:auto;
-   background:#111b21;
+   background:var(--sidebar-bg);
  }
  .contact{
    padding:8px 10px;
    display:flex;
    gap:10px;
    cursor:pointer;
-   border-bottom:1px solid #202c33;
+   border-bottom:1px solid var(--border-strong);
  }
  .contact:hover{
-   background:#202c33;
+   background:var(--sidebar-header-bg);
  }
  .contact.active{
-   background:#202c33;
+   background:var(--sidebar-header-bg);
  }
  .contact-avatar{
    width:32px;height:32px;border-radius:50%;
-   background:#202c33;
+   background:var(--sidebar-header-bg);
    display:flex;align-items:center;justify-content:center;
    font-size:14px;
    color:var(--wa-text-soft);
@@ -725,12 +770,12 @@ INBOX_HTML = """
    flex:1;
    display:flex;
    flex-direction:column;
-   background:#0b141a;
+   background:var(--chat-bg);
  }
  .chat-header{
    padding:10px 12px;
-   background:#202c33;
-   border-bottom:1px solid #202c33;
+   background:var(--chat-panel-bg);
+   border-bottom:1px solid var(--border-strong);
    display:flex;
    justify-content:space-between;
    align-items:center;
@@ -760,8 +805,7 @@ INBOX_HTML = """
  .chat-messages{
    flex:1;
    padding:12px;
-   background:#0a1014;
-   background-image:url("https://static.whatsapp.net/rsrc.php/v3/yz/r/11VDxZy0U6q.png");
+   background:var(--chat-messages-bg);
    background-size:400px;
    overflow-y:auto;
    display:flex;
@@ -775,7 +819,8 @@ INBOX_HTML = """
  }
  .msg.in{
    margin-right:auto;
-   background:#202c33;
+   background:var(--sidebar-header-bg);
+   color:var(--wa-text);
  }
  .msg.out{
    margin-left:auto;
@@ -805,8 +850,8 @@ INBOX_HTML = """
  .msg-media a:hover{text-decoration:underline;}
  .chat-compose{
    padding:8px;
-   background:#202c33;
-   border-top:1px solid #202c33;
+   background:var(--chat-panel-bg);
+   border-top:1px solid var(--border-strong);
  }
  .chat-compose form{
    display:flex;
@@ -825,9 +870,9 @@ INBOX_HTML = """
  .compose-row input{
    padding:6px 8px;
    border-radius:6px;
-   border:1px solid #374151;
+   border:1px solid var(--input-border);
    outline:none;
-   background:#111827;
+   background:var(--input-bg);
    color:var(--wa-text);
  }
  .compose-row select:focus,
@@ -839,8 +884,8 @@ INBOX_HTML = """
    width:100%;
    padding:6px 8px;
    border-radius:6px;
-   border:1px solid #374151;
-   background:#111827;
+   border:1px solid var(--input-border);
+   background:var(--input-bg);
    color:var(--wa-text);
    font-size:12px;
    min-height:60px;
@@ -850,7 +895,7 @@ INBOX_HTML = """
    align-self:flex-end;
    background:var(--wa-green);
    border:none;
-   color:#111827;
+   color:#022c22;
    padding:6px 14px;
    border-radius:999px;
    font-weight:600;
@@ -863,16 +908,16 @@ INBOX_HTML = """
  .small{font-size:11px;color:var(--wa-text-soft);}
  /* Bulk panel */
  .bulk-panel{
-   background:#111b21;
-   border-top:1px solid #202c33;
+   background:var(--bulk-panel-bg);
+   border-top:1px solid var(--border-strong);
    padding:10px 12px;
    font-size:12px;
  }
  details.bulk{
-   background:#111827;
+   background:var(--bulk-inner-bg);
    border-radius:6px;
    padding:8px 10px;
-   border:1px solid #1f2937;
+   border:1px solid var(--border-soft);
  }
  details.bulk summary{
    list-style:none;
@@ -905,8 +950,8 @@ INBOX_HTML = """
  .bulk textarea{
    padding:6px 8px;
    border-radius:6px;
-   border:1px solid #374151;
-   background:#020617;
+   border:1px solid var(--input-border);
+   background:var(--input-bg);
    color:var(--wa-text);
    font-size:12px;
  }
@@ -939,7 +984,7 @@ INBOX_HTML = """
  #toast.error{background:#dc2626;}
  @media(max-width:900px){
    .app{flex-direction:column;}
-   .sidebar{width:100%;height:40%;border-right:none;border-bottom:1px solid #202c33;}
+   .sidebar{width:100%;height:40%;border-right:none;border-bottom:1px solid var(--border-strong);}
    .chat{height:60%;}
  }
 </style>
@@ -949,7 +994,7 @@ INBOX_HTML = """
 <div class="topbar">
   <div class="topbar-title">
     <span class="logo-dot"></span>
-    <span>Al-Khawarizmi WhatsApp Inbox</span>
+    <span>Al-Khawarizmi WhatsApp Inbox - Elite Dev. 2025</span>
   </div>
   <div class="topbar-actions">
     <form method="post" action="/toggle-autoreply?dir={{active_dir}}" style="margin:0">
@@ -962,6 +1007,9 @@ INBOX_HTML = """
     <a href="/export.csv?dir=in" class="pill-btn pill-export" title="Export inbox as CSV">
       Export CSV
     </a>
+    <button type="button" id="themeToggle" class="pill-btn pill-theme">
+      🌙 Dark
+    </button>
   </div>
 </div>
 
@@ -1319,12 +1367,32 @@ INBOX_HTML = """
       }
       chatText.value = '';
       showToast('Message sent ✓', false);
-      // reload chat to show latest
+      // reload chat to show latest + update sidebar
       setTimeout(()=>{ loadChat(activePhone); loadContacts(); },400);
     }catch(e){
       console.error('send error', e);
       showToast('Failed: ' + e.message, true);
     }
+  });
+
+  // THEME TOGGLE
+  const themeToggleBtn = document.getElementById('themeToggle');
+  function applyTheme(theme){
+    document.documentElement.setAttribute('data-theme', theme);
+    if(theme === 'light'){
+      themeToggleBtn.textContent = ' Light';
+    }else{
+      themeToggleBtn.textContent = ' Dark';
+    }
+  }
+  const savedTheme = localStorage.getItem('waTheme') || 'dark';
+  applyTheme(savedTheme);
+
+  themeToggleBtn.addEventListener('click', ()=>{
+    const current = document.documentElement.getAttribute('data-theme') || 'dark';
+    const next = current === 'dark' ? 'light' : 'dark';
+    applyTheme(next);
+    localStorage.setItem('waTheme', next);
   });
 
   // Initial load + polling
