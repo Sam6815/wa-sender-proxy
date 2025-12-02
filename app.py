@@ -234,8 +234,9 @@ def build_ack_message(profile_name=None):
     return (
         f"Thank you {name_part} for contacting Al-Khawarizmi Group, your request is being processed "
         f"and we will contact you shortly after.\n"
-        f".{name_part}شكراً\n"
-        f"لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً\n"            # recent edits on arabic version
+        f"\n"
+        f"{name_part} شكراً\n"
+        f".لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً\n"            # recent edits on arabic version
     )
 
 def build_ack_message_encoded(profile_name=None):
