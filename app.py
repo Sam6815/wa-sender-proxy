@@ -1395,11 +1395,19 @@ INBOX_HTML = """
     localStorage.setItem('waTheme', next);
   });
 
-  // Initial load + polling
+  // Initial load
   loadContacts();
-  setInterval(loadContacts, 8000);
+
+  // Periodic refresh: contacts + active chat
+  setInterval(()=>{
+    loadContacts();
+    if (activePhone) {
+      loadChat(activePhone);
+    }
+  }, 5000);
 })();
 </script>
+
 
 </body>
 </html>
