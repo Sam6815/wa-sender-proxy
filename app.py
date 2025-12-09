@@ -235,7 +235,7 @@ def build_ack_message(profile_name=None):
         f"Thank you {name_part} for contacting Al-Khawarizmi Group, your request is being processed "
         f"and we will contact you shortly after.\n\n"
         f"{name_part} شكراً\n"
-        f"لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً\n"            # recent edits on arabic version
+        f"لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً\n"
     )
 
 def build_ack_message_encoded(profile_name=None):
@@ -279,19 +279,101 @@ def _massage_messages(rows, base_url):
         out.append(m)
     return out
 
+# ---- Template normalization for Flow safety ----
+def normalize_template_for_flows(tpl):
+    """
+    Make template payload safe when it includes Flow buttons or when the user
+    pasted template-definition JSON from /message_templates.
+
+    - If components look like template-definition (type in ALL CAPS, e.g. 'BODY',
+      'BUTTONS'), drop them all and send only name+language.
+    - If send-time components contain a Flow button, drop that component and let
+      WhatsApp attach the Flow defined in the template.
+    """
+    if not tpl:
+        return tpl
+
+    comps = tpl.get("components")
+    if not comps:
+        return tpl
+
+    # Case A: user pasted template-definition JSON (types in ALL CAPS)
+    for c in comps:
+        t = c.get("type")
+        if isinstance(t, str) and t.isupper():
+            # Very likely template-definition format, not send-time payload.
+            new_tpl = dict(tpl)
+            new_tpl.pop("components", None)
+            return new_tpl
+
+    # Case B: normal send-time components, but possibly with Flow buttons
+    new_comps = []
+    for c in comps:
+        c_type = (c.get("type") or "").lower()
+
+        # Send-time payload uses "button"; some may use "buttons"
+        if c_type in ("button", "buttons"):
+            sub = (c.get("sub_type") or "").lower()
+
+            # 1) Send-time Flow button component: drop it
+            if sub == "flow":
+                continue
+
+            # 2) Definition-style: {"type":"BUTTONS","buttons":[{"type":"FLOW",...}]}
+            buttons = c.get("buttons") or []
+            if any((b.get("type") or "").lower() == "flow" for b in buttons):
+                continue
+
+        new_comps.append(c)
+
+    new_tpl = dict(tpl)
+    if new_comps:
+        new_tpl["components"] = new_comps
+    else:
+        new_tpl.pop("components", None)
+    return new_tpl
+
 # Core send logic
 def do_send(to, kind="text", text="", template=None):
     if not to:
         raise RuntimeError("missing 'to'")
     if kind == "text":
-        out = {"messaging_product":"whatsapp","to":to,"type":"text","text":{"body": text or ""}}
+        out = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "text",
+            "text": {"body": text or ""}
+        }
     elif kind == "template":
         tpl = template or {}
-        name = tpl.get("name"); lang = tpl.get("language") or "en"
-        if not name: raise RuntimeError("template.name required")
-        t = {"name": name, "language": {"code": lang}}
-        if tpl.get("components"): t["components"] = tpl["components"]
-        out = {"messaging_product":"whatsapp","to":to,"type":"template","template":t}
+
+        # Normalize components so Flow templates don't break
+        tpl = normalize_template_for_flows(tpl)
+
+        name = tpl.get("name")
+        lang = tpl.get("language") or "en"
+        if not name:
+            raise RuntimeError("template.name required")
+
+        # language can be "en" or {"code": "en"}
+        if isinstance(lang, dict):
+            lang_code = lang.get("code") or "en"
+        else:
+            lang_code = lang
+
+        t = {
+            "name": name,
+            "language": {"code": lang_code}
+        }
+        if tpl.get("components"):
+            t["components"] = tpl["components"]
+
+        out = {
+            "messaging_product": "whatsapp",
+            "to": to,
+            "type": "template",
+            "template": t
+        }
     else:
         raise RuntimeError("unsupported kind")
     resp = graph_post(f"{WA_PNID}/messages", out)
@@ -1549,9 +1631,7 @@ def inbox_bulk():
                 tpl["components"] = components
 
             results = bulk_send(
-                numbers,
-                kind="template",
-                template=tpl,
+                numbers, kind="template", template=tpl,
                 concurrency=int(conc or BULK_CONCURRENCY_DEFAULT),
                 per_call_sleep=float(sleep or BULK_SLEEP_DEFAULT)
             )
@@ -1697,7 +1777,7 @@ def export_csv():
 
     buf = io.StringIO()
     # Write UTF-8 BOM so Excel correctly detects encoding (Arabic, etc.)
-    buf.write("\\ufeff")
+    buf.write("\ufeff")
 
     writer = csv.writer(buf)
     writer.writerow([
@@ -1716,7 +1796,7 @@ def export_csv():
     ])
 
     for m in rows:
-        body = (m.get("body") or "").replace("\\n", " ").replace("\\r", " ")
+        body = (m.get("body") or "").replace("\n", " ").replace("\r", " ")
         writer.writerow([
             m.get("id"),
             fmt_gmt2(m.get("created_at", "")),
