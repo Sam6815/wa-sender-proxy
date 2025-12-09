@@ -348,23 +348,20 @@ def do_send(to, kind="text", text="", template=None):
     if not to:
         raise RuntimeError("missing 'to'")
 
-    out = None  # we keep the actual payload we will log/store
+    out = None  # payload we will actually send/log
 
     if kind == "text":
+        # Simple text message
         out = {
             "messaging_product": "whatsapp",
             "to": to,
             "type": "text",
             "text": {"body": text or ""}
         }
-
         resp = graph_post(f"{WA_PNID}/messages", out)
 
     elif kind == "template":
         tpl = template or {}
-
-        # 1) Normalize components so Flow / button stuff doesn't break
-        tpl = normalize_template_for_flows(tpl)
 
         name = tpl.get("name")
         lang = tpl.get("language") or "en"
@@ -377,12 +374,12 @@ def do_send(to, kind="text", text="", template=None):
         else:
             lang_code = lang
 
+        # 🔴 IMPORTANT: we DO NOT send any components here.
+        # This makes Flow templates happy and avoids sub_type errors.
         t = {
             "name": name,
             "language": {"code": lang_code}
         }
-        if tpl.get("components"):
-            t["components"] = tpl["components"]
 
         out = {
             "messaging_product": "whatsapp",
@@ -391,28 +388,7 @@ def do_send(to, kind="text", text="", template=None):
             "template": t
         }
 
-        # 2) Send with components first, but if 131009/sub_type appears,
-        #    auto-retry ONCE with name+language only (Flow-safe).
-        try:
-            resp = graph_post(f"{WA_PNID}/messages", out)
-        except RuntimeError as e:
-            msg = str(e)
-            if "131009" in msg and "sub_type" in msg:
-                # Retry with bare template (no components)
-                bare_t = {
-                    "name": name,
-                    "language": {"code": lang_code}
-                }
-                out = {
-                    "messaging_product": "whatsapp",
-                    "to": to,
-                    "type": "template",
-                    "template": bare_t
-                }
-                resp = graph_post(f"{WA_PNID}/messages", out)
-            else:
-                # other error, re-raise
-                raise
+        resp = graph_post(f"{WA_PNID}/messages", out)
 
     else:
         raise RuntimeError("unsupported kind")
