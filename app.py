@@ -193,16 +193,36 @@ def require_basic_auth(fn):
 def graph_post(path, payload):
     if not WA_PNID or not WA_TOKEN:
         raise RuntimeError("WA_PNID/WA_TOKEN not configured.")
+
+    # --- FINAL SAFETY NET: never send template.components ---
+    # This guarantees Flow templates won't fail with sub_type errors.
+    if isinstance(payload, dict):
+        try:
+            if payload.get("type") == "template":
+                tpl = payload.get("template")
+                if isinstance(tpl, dict):
+                    tpl = dict(tpl)
+                    # Hard drop ANY components before sending to Graph
+                    tpl.pop("components", None)
+                    payload = dict(payload)
+                    payload["template"] = tpl
+        except Exception as _e:
+            # don't block sending if cleaning fails; just continue
+            pass
+
     url = f"{GRAPH_BASE}/{path.lstrip('/')}"
+    print("WA OUT:", json.dumps(payload, ensure_ascii=False), flush=True)  # debug log
+
     r = requests.post(
         url,
-        headers={"Authorization": f"Bearer {WA_TOKEN}", "Content-Type":"application/json"},
+        headers={"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"},
         data=json.dumps(payload),
         timeout=30
     )
     if not r.ok:
         raise RuntimeError(f"POST {url} -> {r.status_code} {r.text}")
     return r.json()
+
 
 def graph_get(path):
     if not WA_TOKEN:
