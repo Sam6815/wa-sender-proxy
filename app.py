@@ -312,6 +312,16 @@ def _massage_messages(rows, base_url):
     return out
 
 # Core send logic
+def _lang_code_from(value, default="en"):
+    """Normalize language to a lowercase code string."""
+    if isinstance(value, dict):
+        value = value.get("code")
+    if not value:
+        return default
+    return str(value).strip().lower() or default
+
+
+
 def do_send(to, kind="text", text="", template=None):
     """
     Main send function used by:
@@ -344,11 +354,25 @@ def do_send(to, kind="text", text="", template=None):
             raise RuntimeError("template.name required")
 
         # language can be "en" or {"code": "en"}
-        lang = tpl.get("language") or "en"
-        if isinstance(lang, dict):
-            lang_code = lang.get("code") or "en"
+        #lang = tpl.get("language") or "en"
+        lang_code = _lang_code_from(tpl.get("language"))
+
+        # IMPORTANT: components are only forwarded when explicitly enabled.
+        # When allowed, forward the user's template payload as-is (with minimal
+        # language normalization) so Flow/button definitions keep their
+        # sub_type/parameters intact.
+        if ALLOW_TEMPLATE_COMPONENTS:
+            t = dict(tpl)
+            # Force language to object form so Graph accepts Flow components
+            # even if the caller provided a bare string and ensure lowercase
+            # (e.g., "ar", "en_us").
+            t["language"] = {"code": lang_code}
         else:
-            lang_code = lang
+            t = {
+                "name": name,
+                "language": {"code": lang_code}
+            }
+
 
         # IMPORTANT: components are only forwarded when explicitly enabled.
         # When allowed, forward the user's template payload as-is (with minimal
