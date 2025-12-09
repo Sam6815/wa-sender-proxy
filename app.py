@@ -339,21 +339,34 @@ def do_send(to, kind="text", text="", template=None):
     elif kind == "template":
         tpl = template or {}
         name = tpl.get("name")
-        lang = tpl.get("language") or "en"
+        
         if not name:
             raise RuntimeError("template.name required")
 
         # language can be "en" or {"code": "en"}
+        lang = tpl.get("language") or "en"
         if isinstance(lang, dict):
             lang_code = lang.get("code") or "en"
         else:
             lang_code = lang
 
         # IMPORTANT: components are only forwarded when explicitly enabled.
-        t = {
-            "name": name,
-            "language": {"code": lang_code}
-        }
+        # When allowed, forward the user's template payload as-is (with minimal
+        # language normalization) so Flow/button definitions keep their
+        # sub_type/parameters intact.
+        if ALLOW_TEMPLATE_COMPONENTS:
+            t = dict(tpl)
+            t["language"] = tpl.get("language") or {"code": lang_code}
+        else:
+            t = {
+                "name": name,
+                "language": {"code": lang_code}
+            }
+
+        if tpl.get("components") and not ALLOW_TEMPLATE_COMPONENTS:
+            raise RuntimeError(
+                "Template components blocked: set WA_ALLOW_TEMPLATE_COMPONENTS=1 to send interactive/Flow templates."
+            )
         if tpl.get("components"):
             if not ALLOW_TEMPLATE_COMPONENTS:
                 raise RuntimeError(
