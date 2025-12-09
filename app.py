@@ -349,11 +349,13 @@ def do_send(to, kind="text", text="", template=None):
         else:
             lang_code = lang
 
-        # IMPORTANT: we do NOT forward any components here.
+        # IMPORTANT: components are only forwarded when explicitly enabled.
         t = {
             "name": name,
             "language": {"code": lang_code}
         }
+        if ALLOW_TEMPLATE_COMPONENTS and tpl.get("components"):
+            t["components"] = tpl.get("components")
 
         out = {
             "messaging_product": "whatsapp",
