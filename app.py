@@ -354,9 +354,12 @@ def do_send(to, kind="text", text="", template=None):
             "name": name,
             "language": {"code": lang_code}
         }
-        if ALLOW_TEMPLATE_COMPONENTS and tpl.get("components"):
+        if tpl.get("components"):
+            if not ALLOW_TEMPLATE_COMPONENTS:
+                raise RuntimeError(
+                    "Template components blocked: set WA_ALLOW_TEMPLATE_COMPONENTS=1 to send interactive/Flow templates."
+                )
             t["components"] = tpl.get("components")
-
         out = {
             "messaging_product": "whatsapp",
             "to": to,
