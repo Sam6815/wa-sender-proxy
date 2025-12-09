@@ -356,7 +356,12 @@ def do_send(to, kind="text", text="", template=None):
         # sub_type/parameters intact.
         if ALLOW_TEMPLATE_COMPONENTS:
             t = dict(tpl)
-            t["language"] = tpl.get("language") or {"code": lang_code}
+            lang_value = tpl.get("language")
+            if isinstance(lang_value, str):
+                lang_value = {"code": lang_value or lang_code}
+            elif not lang_value:
+                lang_value = {"code": lang_code}
+            t["language"] = lang_value
         else:
             t = {
                 "name": name,
