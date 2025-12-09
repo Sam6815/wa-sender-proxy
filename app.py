@@ -35,7 +35,7 @@ DATABASE_URL = os.getenv("DATABASE_URL") or ""  # database url on render
 
 # Bulk defaults
 BULK_CONCURRENCY_DEFAULT = int(os.getenv("BULK_CONCURRENCY", "5"))
-BULK_SLEEP_DEFAULT = float(os.getenv("BULK_PER_CALL_SLEEP", "0.1"))  # 0.1s 
+BULK_SLEEP_DEFAULT = float(os.getenv("BULK_PER_CALL_SLEEP", "0.1"))  # 0.1s
 BULK_MAX_RETRIES = int(os.getenv("BULK_MAX_RETRIES", "2"))
 
 APP_DIR = Path(__file__).resolve().parent
@@ -191,38 +191,43 @@ def require_basic_auth(fn):
 
 # -------- Helpers --------
 def graph_post(path, payload):
+    """
+    Final sending helper to WhatsApp Graph API.
+
+    IMPORTANT:
+    - For template messages, we forcibly remove any template.components
+      before sending. This avoids Flow 'sub_type' errors and also
+      protects against accidental components being added upstream.
+    """
     if not WA_PNID or not WA_TOKEN:
         raise RuntimeError("WA_PNID/WA_TOKEN not configured.")
 
     # --- FINAL SAFETY NET: never send template.components ---
-    # This guarantees Flow templates won't fail with sub_type errors.
     if isinstance(payload, dict):
         try:
             if payload.get("type") == "template":
                 tpl = payload.get("template")
                 if isinstance(tpl, dict):
                     tpl = dict(tpl)
-                    # Hard drop ANY components before sending to Graph
-                    tpl.pop("components", None)
+                    tpl.pop("components", None)  # drop all components
                     payload = dict(payload)
                     payload["template"] = tpl
         except Exception as _e:
-            # don't block sending if cleaning fails; just continue
+            # do not block sending if the cleaning logic fails
             pass
 
     url = f"{GRAPH_BASE}/{path.lstrip('/')}"
-    print("WA OUT:", json.dumps(payload, ensure_ascii=False), flush=True)  # debug log
+    print("WA OUT:", json.dumps(payload, ensure_ascii=False), flush=True)
 
     r = requests.post(
         url,
-        headers={"Authorization": f"Bearer {WA_TOKEN}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {WA_TOKEN}", "Content-Type":"application/json"},
         data=json.dumps(payload),
         timeout=30
     )
     if not r.ok:
         raise RuntimeError(f"POST {url} -> {r.status_code} {r.text}")
     return r.json()
-
 
 def graph_get(path):
     if not WA_TOKEN:
@@ -252,7 +257,7 @@ def build_ack_message(profile_name=None):
     """
     name_part = f" {profile_name}" if profile_name else ""
     return (
-        f"Thank you {name_part} for contacting Al-Khawarizmi Group, your request is being processed "
+        f"Thank you{name_part} for contacting Al-Khawarizmi Group, your request is being processed "
         f"and we will contact you shortly after.\n\n"
         f"{name_part} شكراً\n"
         f"لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً\n"
@@ -299,79 +304,23 @@ def _massage_messages(rows, base_url):
         out.append(m)
     return out
 
-# ---- Template normalization for Flow safety ----
-def normalize_template_for_flows(tpl):
-    """
-    Make template payload safe when it includes Flow buttons or when the user
-    pasted template-definition JSON from /message_templates.
-
-    Strategy (very defensive):
-
-    1) If any component has TYPE in ALL CAPS (e.g. 'BODY', 'BUTTONS', 'HEADER'),
-       assume it's template-definition JSON -> drop ALL components and rely
-       only on template name + language.
-
-    2) Otherwise (send-time payload), drop ANY component that:
-       - has type 'button' or 'buttons', OR
-       - has a 'sub_type' field, OR
-       - has nested 'buttons' list with 'sub_type' or Flow type.
-    """
-    if not tpl:
-        return tpl
-
-    comps = tpl.get("components")
-    if not comps:
-        return tpl
-
-    # Case A: template-definition JSON (Manager export)
-    for c in comps:
-        t = c.get("type")
-        if isinstance(t, str) and t.isupper():
-            # Very likely template-definition format, not send-time payload.
-            new_tpl = dict(tpl)
-            new_tpl.pop("components", None)
-            return new_tpl
-
-    # Case B: send-time payload - aggressively strip anything button/sub_type/flow
-    cleaned = []
-    for c in comps:
-        c_type = (c.get("type") or "").lower()
-
-        # Never send button/buttONS components from here (let template handle it)
-        if c_type in ("button", "buttons"):
-            continue
-
-        # If this component itself has sub_type, we drop it (URL/QR/FLOW/etc.)
-        if "sub_type" in c:
-            continue
-
-        # If it has nested buttons (definition style), drop if any look like flows
-        btns = c.get("buttons") or []
-        if any(
-            ("sub_type" in b) or ((b.get("type") or "").lower() == "flow")
-            for b in btns
-        ):
-            continue
-
-        cleaned.append(c)
-
-    new_tpl = dict(tpl)
-    if cleaned:
-        new_tpl["components"] = cleaned
-    else:
-        new_tpl.pop("components", None)
-    return new_tpl
-
-
 # Core send logic
 def do_send(to, kind="text", text="", template=None):
+    """
+    Main send function used by:
+      - /send  (JSON API)
+      - /inbox/send (single)
+      - bulk_send (bulk)
+      - auto-reply (webhook)
+    For templates, we intentionally do NOT send any components.
+    This makes Flow templates safe and avoids 131009 sub_type issues.
+    """
     if not to:
         raise RuntimeError("missing 'to'")
 
-    out = None  # payload we will actually send/log
+    out = None
 
     if kind == "text":
-        # Simple text message
         out = {
             "messaging_product": "whatsapp",
             "to": to,
@@ -382,7 +331,6 @@ def do_send(to, kind="text", text="", template=None):
 
     elif kind == "template":
         tpl = template or {}
-
         name = tpl.get("name")
         lang = tpl.get("language") or "en"
         if not name:
@@ -394,8 +342,7 @@ def do_send(to, kind="text", text="", template=None):
         else:
             lang_code = lang
 
-        # 🔴 IMPORTANT: we DO NOT send any components here.
-        # This makes Flow templates happy and avoids sub_type errors.
+        # IMPORTANT: we do NOT forward any components here.
         t = {
             "name": name,
             "language": {"code": lang_code}
@@ -418,18 +365,11 @@ def do_send(to, kind="text", text="", template=None):
     conv = resp.get("conversation") or {}
     store_message(
         direction="out",
-        wa_from=None,
-        wa_to=to,
-        wa_id=wa_id,
-        name=None,
-        type=out["type"],
-        body=json.dumps(out, ensure_ascii=False),
-        status="sent",
-        conversation_id=conv.get("id"),
-        conversation_category=conv.get("category"),
+        wa_from=None, wa_to=to, wa_id=wa_id, name=None,
+        type=out["type"], body=json.dumps(out, ensure_ascii=False), status="sent",
+        conversation_id=conv.get("id"), conversation_category=conv.get("category"),
     )
     return resp
-
 
 # ---------- BULK SEND ----------
 def do_send_safe(number, kind="template", text="", template=None):
@@ -481,7 +421,7 @@ def webhook_verify():
 # ------- CHATBOT IMPLEMENTATION --------------
 
 # ---- Auto-reply toggle (global in-memory flag) ----
-AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "0") == "1"                             # autoreply defaults is off
+AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "0") == "1"  # autoreply defaults off
 
 def auto_reply_for_text(text, profile_name=None):
     """
@@ -563,7 +503,7 @@ def webhook_inbound():
                 contacts = value.get("contacts") or [{}]
                 profile_name = (contacts[0].get("profile") or {}).get("name") if contacts else None
                 meta = value.get("metadata") or {}
-                
+
                 for msg in (value.get("messages") or []):
                     mtype = msg.get("type")
 
@@ -1540,7 +1480,6 @@ INBOX_HTML = """
 </html>
 """
 
-
 # ---- Routes for Inbox UI ----
 @app.get("/inbox")
 @require_basic_auth
@@ -1602,7 +1541,6 @@ def inbox_send():
                         ]
                     }
                 ]
-                # (Body variables can be added later via extra UI if you want.)
 
             tpl = {"name": tpl_name, "language": tpl_lang}
             if components:
@@ -1675,7 +1613,9 @@ def inbox_bulk():
                 tpl["components"] = components
 
             results = bulk_send(
-                numbers, kind="template", template=tpl,
+                numbers,
+                kind="template",
+                template=tpl,
                 concurrency=int(conc or BULK_CONCURRENCY_DEFAULT),
                 per_call_sleep=float(sleep or BULK_SLEEP_DEFAULT)
             )
@@ -1782,8 +1722,15 @@ def health():
 @app.post("/send")
 @require_basic_auth
 def send_api():
+    """
+    JSON body:
+      { "to": "9617xxxxxx", "kind": "text", "text": "hi" }
+      or
+      { "to": "9617xxxxxx", "kind": "template", "template": { "name":"xyz", "language":"en", ... } }
+    """
     p = request.get_json(force=True, silent=False)
-    to = p.get("to"); kind = p.get("kind","text")
+    to = p.get("to")
+    kind = p.get("kind","text")
     try:
         if kind == "text":
             resp = do_send(to, kind="text", text=p.get("text",""))
