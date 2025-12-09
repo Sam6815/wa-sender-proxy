@@ -285,10 +285,16 @@ def normalize_template_for_flows(tpl):
     Make template payload safe when it includes Flow buttons or when the user
     pasted template-definition JSON from /message_templates.
 
-    - If components look like template-definition (type in ALL CAPS, e.g. 'BODY',
-      'BUTTONS'), drop them all and send only name+language.
-    - If send-time components contain a Flow button, drop that component and let
-      WhatsApp attach the Flow defined in the template.
+    Strategy (very defensive):
+
+    1) If any component has TYPE in ALL CAPS (e.g. 'BODY', 'BUTTONS', 'HEADER'),
+       assume it's template-definition JSON -> drop ALL components and rely
+       only on template name + language.
+
+    2) Otherwise (send-time payload), drop ANY component that:
+       - has type 'button' or 'buttons', OR
+       - has a 'sub_type' field, OR
+       - has nested 'buttons' list with 'sub_type' or Flow type.
     """
     if not tpl:
         return tpl
@@ -297,7 +303,7 @@ def normalize_template_for_flows(tpl):
     if not comps:
         return tpl
 
-    # Case A: user pasted template-definition JSON (types in ALL CAPS)
+    # Case A: template-definition JSON (Manager export)
     for c in comps:
         t = c.get("type")
         if isinstance(t, str) and t.isupper():
@@ -306,37 +312,44 @@ def normalize_template_for_flows(tpl):
             new_tpl.pop("components", None)
             return new_tpl
 
-    # Case B: normal send-time components, but possibly with Flow buttons
-    new_comps = []
+    # Case B: send-time payload - aggressively strip anything button/sub_type/flow
+    cleaned = []
     for c in comps:
         c_type = (c.get("type") or "").lower()
 
-        # Send-time payload uses "button"; some may use "buttons"
+        # Never send button/buttONS components from here (let template handle it)
         if c_type in ("button", "buttons"):
-            sub = (c.get("sub_type") or "").lower()
+            continue
 
-            # 1) Send-time Flow button component: drop it
-            if sub == "flow":
-                continue
+        # If this component itself has sub_type, we drop it (URL/QR/FLOW/etc.)
+        if "sub_type" in c:
+            continue
 
-            # 2) Definition-style: {"type":"BUTTONS","buttons":[{"type":"FLOW",...}]}
-            buttons = c.get("buttons") or []
-            if any((b.get("type") or "").lower() == "flow" for b in buttons):
-                continue
+        # If it has nested buttons (definition style), drop if any look like flows
+        btns = c.get("buttons") or []
+        if any(
+            ("sub_type" in b) or ((b.get("type") or "").lower() == "flow")
+            for b in btns
+        ):
+            continue
 
-        new_comps.append(c)
+        cleaned.append(c)
 
     new_tpl = dict(tpl)
-    if new_comps:
-        new_tpl["components"] = new_comps
+    if cleaned:
+        new_tpl["components"] = cleaned
     else:
         new_tpl.pop("components", None)
     return new_tpl
+
 
 # Core send logic
 def do_send(to, kind="text", text="", template=None):
     if not to:
         raise RuntimeError("missing 'to'")
+
+    out = None  # we keep the actual payload we will log/store
+
     if kind == "text":
         out = {
             "messaging_product": "whatsapp",
@@ -344,10 +357,13 @@ def do_send(to, kind="text", text="", template=None):
             "type": "text",
             "text": {"body": text or ""}
         }
+
+        resp = graph_post(f"{WA_PNID}/messages", out)
+
     elif kind == "template":
         tpl = template or {}
 
-        # Normalize components so Flow templates don't break
+        # 1) Normalize components so Flow / button stuff doesn't break
         tpl = normalize_template_for_flows(tpl)
 
         name = tpl.get("name")
@@ -374,18 +390,50 @@ def do_send(to, kind="text", text="", template=None):
             "type": "template",
             "template": t
         }
+
+        # 2) Send with components first, but if 131009/sub_type appears,
+        #    auto-retry ONCE with name+language only (Flow-safe).
+        try:
+            resp = graph_post(f"{WA_PNID}/messages", out)
+        except RuntimeError as e:
+            msg = str(e)
+            if "131009" in msg and "sub_type" in msg:
+                # Retry with bare template (no components)
+                bare_t = {
+                    "name": name,
+                    "language": {"code": lang_code}
+                }
+                out = {
+                    "messaging_product": "whatsapp",
+                    "to": to,
+                    "type": "template",
+                    "template": bare_t
+                }
+                resp = graph_post(f"{WA_PNID}/messages", out)
+            else:
+                # other error, re-raise
+                raise
+
     else:
         raise RuntimeError("unsupported kind")
-    resp = graph_post(f"{WA_PNID}/messages", out)
+
+    # ---- Store sent message in DB ----
     wa_id = (resp.get("messages") or [{}])[0].get("id")
     conv = resp.get("conversation") or {}
     store_message(
         direction="out",
-        wa_from=None, wa_to=to, wa_id=wa_id, name=None,
-        type=out["type"], body=json.dumps(out, ensure_ascii=False), status="sent",
-        conversation_id=conv.get("id"), conversation_category=conv.get("category"),
+        wa_from=None,
+        wa_to=to,
+        wa_id=wa_id,
+        name=None,
+        type=out["type"],
+        body=json.dumps(out, ensure_ascii=False),
+        status="sent",
+        conversation_id=conv.get("id"),
+        conversation_category=conv.get("category"),
     )
     return resp
+
 
 # ---------- BULK SEND ----------
 def do_send_safe(number, kind="template", text="", template=None):
