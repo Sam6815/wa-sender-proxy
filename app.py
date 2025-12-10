@@ -28,10 +28,9 @@ GRAPH_BASE   = "https://graph.facebook.com/v21.0"
 
 # Allow sending template components (e.g., Flow buttons) when explicitly enabled.
 # Default keeps previous safety behavior of stripping components to avoid common
-# Graph API validation errors.
-ALLOW_TEMPLATE_COMPONENTS = True
+# Graph API validation errors. On Render set WA_ALLOW_TEMPLATE_COMPONENTS=1 to allow.
+ALLOW_TEMPLATE_COMPONENTS = os.getenv("WA_ALLOW_TEMPLATE_COMPONENTS", "0") == "1"
 print("DEBUG: ALLOW_TEMPLATE_COMPONENTS =", ALLOW_TEMPLATE_COMPONENTS, flush=True)
-
 
 INBOX_USER = os.getenv("INBOX_USER", "admin")
 INBOX_PASS = os.getenv("INBOX_PASS")              # enable auth when set
@@ -202,16 +201,14 @@ def graph_post(path, payload):
     Final sending helper to WhatsApp Graph API.
 
     IMPORTANT:
-    - For template messages, we forcibly remove any template.components
-      before sending. This avoids Flow 'sub_type' errors and also
-      protects against accidental components being added upstream.
+    - When ALLOW_TEMPLATE_COMPONENTS is False and payload is a template,
+      we strip template.components before sending. This avoids Flow
+      sub_type errors and protects against accidental interactive payloads.
     """
     if not WA_PNID or not WA_TOKEN:
         raise RuntimeError("WA_PNID/WA_TOKEN not configured.")
 
     # --- FINAL SAFETY NET: optionally strip template.components ---
-    # Flow/interactive buttons require components; we preserve them only when
-    # explicitly enabled via WA_ALLOW_TEMPLATE_COMPONENTS=1.
     if isinstance(payload, dict) and not ALLOW_TEMPLATE_COMPONENTS:
         try:
             if payload.get("type") == "template":
@@ -295,7 +292,27 @@ def _massage_messages(rows, base_url):
         m["ack_msg_enc"] = build_ack_message_encoded(profile_name)
 
         t = (m.get("type") or "").lower()
-        if t in {"image","audio","video","document","sticker"} and m.get("body"):
+
+        # FLOW reply preview (nfm_reply)
+        if t == "nfm_reply" and m.get("body"):
+            try:
+                raw = m["body"]
+                obj = json.loads(raw) if isinstance(raw, str) else (raw or {})
+                nfm = obj.get("nfm_reply") or obj
+                parsed = obj.get("parsed_response")
+
+                status = (nfm.get("body") or nfm.get("name") or "Flow reply").strip()
+                if parsed:
+                    short = json.dumps(parsed, ensure_ascii=False)
+                    if len(short) > 160:
+                        short = short[:160] + "…"
+                    m["preview"] = f"FLOW: {status} – {short}"
+                else:
+                    m["preview"] = f"FLOW: {status}"
+            except Exception:
+                m["preview"] = (m.get("body") or "")[:200] + "…"
+
+        elif t in {"image","audio","video","document","sticker"} and m.get("body"):
             try:
                 obj = json.loads(m["body"]) if isinstance(m["body"], str) else (m["body"] or {})
                 payload = obj.get(t) if isinstance(obj, dict) and isinstance(obj.get(t), dict) else obj
@@ -317,12 +334,10 @@ def _massage_messages(rows, base_url):
 def _lang_code_from(value, default="en"):
     """Normalize language to a lowercase code string."""
     if isinstance(value, dict):
-        value = value.get("code")
+        value = value.get("code") or value.get("language")
     if not value:
         return default
     return str(value).strip().lower() or default
-
-
 
 def do_send(to, kind="text", text="", template=None):
     """
@@ -331,8 +346,6 @@ def do_send(to, kind="text", text="", template=None):
       - /inbox/send (single)
       - bulk_send (bulk)
       - auto-reply (webhook)
-    For templates, we intentionally do NOT send any components.
-    This makes Flow templates safe and avoids 131009 sub_type issues.
     """
     if not to:
         raise RuntimeError("missing 'to'")
@@ -351,60 +364,45 @@ def do_send(to, kind="text", text="", template=None):
     elif kind == "template":
         tpl = template or {}
         name = tpl.get("name")
-        
         if not name:
             raise RuntimeError("template.name required")
 
-        # language can be "en" or {"code": "en"}
-        #lang = tpl.get("language") or "en"
+        # Normalize language into an object {"code": "<lc_code>"}
         lang_code = _lang_code_from(tpl.get("language"))
+        lang_value = tpl.get("language")
 
-        # IMPORTANT: components are only forwarded when explicitly enabled.
-        # When allowed, forward the user's template payload as-is (with minimal
-        # language normalization) so Flow/button definitions keep their
-        # sub_type/parameters intact.
-        if ALLOW_TEMPLATE_COMPONENTS:
-            t = dict(tpl)
-            # Force language to object form so Graph accepts Flow components
-            # even if the caller provided a bare string and ensure lowercase
-            # (e.g., "ar", "en_us").
-            t["language"] = {"code": lang_code}
+        if isinstance(lang_value, str):
+            lang_value = {"code": _lang_code_from(lang_value, default=lang_code)}
+        elif isinstance(lang_value, dict):
+            c = _lang_code_from(
+                lang_value.get("code") or lang_value.get("language") or lang_code,
+                default=lang_code
+            )
+            lang_value = {"code": c}
         else:
-            t = {
-                "name": name,
-                "language": {"code": lang_code}
-            }
+            lang_value = {"code": lang_code}
 
-
-        # IMPORTANT: components are only forwarded when explicitly enabled.
-        # When allowed, forward the user's template payload as-is (with minimal
-        # language normalization) so Flow/button definitions keep their
-        # sub_type/parameters intact.
         if ALLOW_TEMPLATE_COMPONENTS:
+            # Forward caller's template as-is but with normalized language
             t = dict(tpl)
-            lang_value = tpl.get("language")
-            if isinstance(lang_value, str):
-                lang_value = {"code": lang_value or lang_code}
-            elif not lang_value:
-                lang_value = {"code": lang_code}
             t["language"] = lang_value
         else:
+            # Safe mode: drop components entirely; block them explicitly below
+            if tpl.get("components"):
+                raise RuntimeError(
+                    "Template components blocked: set WA_ALLOW_TEMPLATE_COMPONENTS=1 to send interactive/Flow templates."
+                )
             t = {
                 "name": name,
-                "language": {"code": lang_code}
+                "language": lang_value,
             }
 
-        if tpl.get("components") and not ALLOW_TEMPLATE_COMPONENTS:
-            raise RuntimeError(
-                "Template components blocked: set WA_ALLOW_TEMPLATE_COMPONENTS=1 to send interactive/Flow templates."
-            )
         out = {
             "messaging_product": "whatsapp",
             "to": to,
             "type": "template",
             "template": t
         }
-
         resp = graph_post(f"{WA_PNID}/messages", out)
 
     else:
@@ -561,6 +559,25 @@ def webhook_inbound():
                     if mtype == "text":
                         inbound_text = (msg.get("text") or {}).get("body", "")
                         body = inbound_text
+
+                    elif mtype == "nfm_reply":
+                        # Flow reply: parse response_json
+                        nfm = msg.get("nfm_reply") or {}
+                        raw_rj = nfm.get("response_json")
+                        parsed = None
+                        try:
+                            if isinstance(raw_rj, str):
+                                parsed = json.loads(raw_rj)
+                        except Exception:
+                            parsed = None
+                        body = json.dumps(
+                            {
+                                "nfm_reply": nfm,
+                                "parsed_response": parsed,
+                            },
+                            ensure_ascii=False
+                        )
+
                     else:
                         body = json.dumps(msg.get(mtype, {}) or {}, ensure_ascii=False)
 
