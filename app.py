@@ -27,8 +27,6 @@ WA_TOKEN     = os.getenv("WA_TOKEN")
 GRAPH_BASE   = "https://graph.facebook.com/v21.0"
 
 # Allow sending template components (e.g., Flow buttons) when explicitly enabled.
-# Default keeps previous safety behavior of stripping components to avoid common
-# Graph API validation errors. On Render set WA_ALLOW_TEMPLATE_COMPONENTS=1 to allow.
 ALLOW_TEMPLATE_COMPONENTS = os.getenv("WA_ALLOW_TEMPLATE_COMPONENTS", "0") == "1"
 print("DEBUG: ALLOW_TEMPLATE_COMPONENTS =", ALLOW_TEMPLATE_COMPONENTS, flush=True)
 
@@ -59,34 +57,26 @@ def get_conn():
     """
     If DATABASE_URL is set -> Postgres (Render).
     Otherwise -> local SQLite (messages.db).
-
-    We add connect_timeout to avoid hanging the deploy if Postgres is misconfigured.
     """
     if DATABASE_URL:
         import psycopg2
         try:
-            # Use DSN directly so sslmode and other params in the URL are respected.
             conn = psycopg2.connect(DATABASE_URL, connect_timeout=5)
             conn.autocommit = True
             return conn
         except Exception as e:
             print("⚠️ Postgres connection failed:", e, flush=True)
-            # Fail fast so Render shows a clear error instead of a generic timeout
             raise
-
-    # Fallback: SQLite (used locally when DATABASE_URL is not set)
     return sqlite3.connect(DB_PATH)
 
 
 def init_db():
     """
     Create the messages table on first run.
-    Uses Postgres DDL when DATABASE_URL is present, otherwise SQLite.
     """
     with get_conn() as c:
         cur = c.cursor()
         if DATABASE_URL:
-            # Postgres
             cur.execute("""
             CREATE TABLE IF NOT EXISTS messages (
               id SERIAL PRIMARY KEY,
@@ -99,7 +89,6 @@ def init_db():
             )
             """)
         else:
-            # SQLite
             cur.execute("""
             CREATE TABLE IF NOT EXISTS messages (
               id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -117,7 +106,6 @@ def store_message(**kw):
         "created_at","direction","wa_from","wa_to","wa_id","name",
         "type","body","status","conversation_id","conversation_category"
     )
-    # store as UTC naive ISO for consistency
     values = [kw.get("created_at") or datetime.utcnow().isoformat()] + [
         kw.get(f) for f in fields[1:]
     ]
@@ -170,7 +158,6 @@ try:
     init_db()
     print(f"DB backend: {'Postgres' if DATABASE_URL else 'SQLite'}", flush=True)
 except Exception as e:
-    # If this prints in Render logs, fix DATABASE_URL or temporarily unset it.
     print("❌ init_db failed:", e, flush=True)
     raise
 
@@ -199,27 +186,20 @@ def require_basic_auth(fn):
 def graph_post(path, payload):
     """
     Final sending helper to WhatsApp Graph API.
-
-    IMPORTANT:
-    - When ALLOW_TEMPLATE_COMPONENTS is False and payload is a template,
-      we strip template.components before sending. This avoids Flow
-      sub_type errors and protects against accidental interactive payloads.
     """
     if not WA_PNID or not WA_TOKEN:
         raise RuntimeError("WA_PNID/WA_TOKEN not configured.")
 
-    # --- FINAL SAFETY NET: optionally strip template.components ---
     if isinstance(payload, dict) and not ALLOW_TEMPLATE_COMPONENTS:
         try:
             if payload.get("type") == "template":
                 tpl = payload.get("template")
                 if isinstance(tpl, dict):
                     tpl = dict(tpl)
-                    tpl.pop("components", None)  # drop all components
+                    tpl.pop("components", None)
                     payload = dict(payload)
                     payload["template"] = tpl
-        except Exception as _e:
-            # do not block sending if the cleaning logic fails
+        except Exception:
             pass
 
     url = f"{GRAPH_BASE}/{path.lstrip('/')}"
@@ -258,9 +238,6 @@ def badge_class(status_text: str) -> str:
 
 # ---- Dynamic ACK builders (with optional profile_name) ----
 def build_ack_message(profile_name=None):
-    """
-    Build the bilingual ACK message, optionally including the profile name.
-    """
     name_part = f" {profile_name}" if profile_name else ""
     return (
         f"Thank you{name_part} for contacting Al-Khawarizmi Group, your request is being processed "
@@ -270,9 +247,6 @@ def build_ack_message(profile_name=None):
     )
 
 def build_ack_message_encoded(profile_name=None):
-    """
-    URL-encoded version of the ACK (for quick-action links).
-    """
     return urllib.parse.quote(build_ack_message(profile_name))
 
 def _massage_messages(rows, base_url):
@@ -285,7 +259,6 @@ def _massage_messages(rows, base_url):
         m["media_link"] = None
         m["status_class"] = badge_class(m.get("status"))
 
-        # Per-row ACK (personalized)
         profile_name = m.get("name")
         ack_msg = build_ack_message(profile_name)
         m["ack_msg"] = ack_msg
@@ -332,7 +305,6 @@ def _massage_messages(rows, base_url):
 
 # Core send logic
 def _lang_code_from(value, default="en"):
-    """Normalize language to a lowercase code string."""
     if isinstance(value, dict):
         value = value.get("code") or value.get("language")
     if not value:
@@ -340,17 +312,8 @@ def _lang_code_from(value, default="en"):
     return str(value).strip().lower() or default
 
 def do_send(to, kind="text", text="", template=None):
-    """
-    Main send function used by:
-      - /send  (JSON API)
-      - /inbox/send (single)
-      - bulk_send (bulk)
-      - auto-reply (webhook)
-    """
     if not to:
         raise RuntimeError("missing 'to'")
-
-    out = None
 
     if kind == "text":
         out = {
@@ -367,7 +330,6 @@ def do_send(to, kind="text", text="", template=None):
         if not name:
             raise RuntimeError("template.name required")
 
-        # Normalize language into an object {"code": "<lc_code>"}
         lang_code = _lang_code_from(tpl.get("language"))
         lang_value = tpl.get("language")
 
@@ -383,11 +345,9 @@ def do_send(to, kind="text", text="", template=None):
             lang_value = {"code": lang_code}
 
         if ALLOW_TEMPLATE_COMPONENTS:
-            # Forward caller's template as-is but with normalized language
             t = dict(tpl)
             t["language"] = lang_value
         else:
-            # Safe mode: drop components entirely; block them explicitly below
             if tpl.get("components"):
                 raise RuntimeError(
                     "Template components blocked: set WA_ALLOW_TEMPLATE_COMPONENTS=1 to send interactive/Flow templates."
@@ -408,7 +368,6 @@ def do_send(to, kind="text", text="", template=None):
     else:
         raise RuntimeError("unsupported kind")
 
-    # ---- Store sent message in DB ----
     wa_id = (resp.get("messages") or [{}])[0].get("id")
     conv = resp.get("conversation") or {}
     store_message(
@@ -468,24 +427,16 @@ def webhook_verify():
 
 # ------- CHATBOT IMPLEMENTATION --------------
 
-# ---- Auto-reply toggle (global in-memory flag) ----
-AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "0") == "1"  # autoreply defaults off
+AUTO_REPLY_ENABLED = os.getenv("AUTO_REPLY_ENABLED", "0") == "1"
 
 def auto_reply_for_text(text, profile_name=None):
-    """
-    Given the inbound text, return a reply string or None to skip auto-reply.
-    Very simple rule-based example.
-    """
-    # Respect global toggle
     if not AUTO_REPLY_ENABLED:
         return None
-
     if not text:
         return None
 
     t = text.strip().lower()
 
-    # Greeting
     if any(g in t for g in ["hi", "hello", "helo", "مرحبا", "salam", "سلامات", "سلام" ]):
         name_part = f" {profile_name}" if profile_name else ""
         return (
@@ -497,7 +448,6 @@ def auto_reply_for_text(text, profile_name=None):
             "3️ to talk to a representative."
         )
 
-    # Menu options
     if t in ["1", "construction", "contracting", "انشاءات", "مقاولات"]:
         return (
             "*Construction & Contracting*\n\n"
@@ -524,7 +474,6 @@ def auto_reply_for_text(text, profile_name=None):
             "Thank you for your patience."
         )
 
-    # Fallback to standard AUTO-REPLY (personalized ACK)
     return build_ack_message(profile_name)
 
 
@@ -565,35 +514,39 @@ def webhook_inbound():
                 for msg in (value.get("messages") or []):
                     mtype = msg.get("type")
 
-                    inbound_text = None      # only used for auto-reply on plain text
-                    body = ""                # what we store into DB
-                    flow_data = None         # parsed nfm_reply data (if any)
+                    inbound_text = None
+                    body = ""
 
                     if mtype == "text":
-                        # Normal text message
                         inbound_text = (msg.get("text") or {}).get("body", "")
                         body = inbound_text or ""
 
                     elif mtype == "nfm_reply":
-                        # Flow (native form) submission
+                        # Flow submission: response_json may contain \u0628... Arabic escapes
                         nfm = msg.get("nfm_reply") or {}
-                        rj = nfm.get("response_json")    # JSON string from Flow
-                        try:
-                            flow_data = json.loads(rj) if rj else {}
-                        except Exception:
-                            flow_data = {"raw_response_json": rj}
+                        rj = nfm.get("response_json")
 
-                        # Log parsed Flow data for debugging
+                        parsed_response = {}
+                        if isinstance(rj, str):
+                            try:
+                                # json.loads will decode \uXXXX into real Unicode (Arabic)
+                                parsed_response = json.loads(rj) if rj.strip() else {}
+                            except Exception:
+                                parsed_response = {"raw_response_json": rj}
+                        elif isinstance(rj, dict):
+                            parsed_response = rj
+
+                        flow_data = {
+                            "nfm_reply": nfm,
+                            "parsed_response": parsed_response,
+                        }
+
                         print("FLOW SUBMISSION:", json.dumps(flow_data, ensure_ascii=False), flush=True)
-
-                        # Store parsed flow payload as JSON in DB body
                         body = json.dumps(flow_data, ensure_ascii=False)
 
                     else:
-                        # Everything else (image, audio, video, document, location, etc.)
                         body = json.dumps(msg.get(mtype, {}) or {}, ensure_ascii=False)
 
-                    # Store inbound message (including Flow submissions)
                     store_message(
                         direction="in",
                         wa_from=msg.get("from"),
@@ -607,13 +560,10 @@ def webhook_inbound():
                         conversation_category=None,
                     )
 
-                    # -------- AUTO-REPLY LOGIC --------
-                    # For now, we only auto-reply to plain text messages.
                     try:
                         if inbound_text:
                             reply_text = auto_reply_for_text(inbound_text, profile_name=profile_name)
                             if reply_text:
-                                # msg["from"] is the user's WhatsApp number
                                 do_send(msg.get("from"), kind="text", text=reply_text)
                     except Exception as e:
                         print("Auto-reply failed:", e, flush=True)
@@ -622,19 +572,15 @@ def webhook_inbound():
         print("Webhook parse error:", e, flush=True)
 
     return jsonify(status="ok"), 200
+
     
 @app.get("/api/contacts")
 @require_basic_auth
 def api_contacts():
-    """
-    Return a list of 'conversations' grouped by phone number
-    (like WhatsApp chat list).
-    """
     base = request.url_root
-    # Get recent messages (in+out+status), newest first
     rows = _massage_messages(fetch_messages(500, direction=None), base)
 
-    contacts_map = {}  # phone -> data
+    contacts_map = {}
     for m in rows:
         direction = m.get("direction")
         if direction not in ("in", "out"):
@@ -655,7 +601,6 @@ def api_contacts():
             }
 
     contacts = list(contacts_map.values())
-    # Sort by last_id desc → latest conversations on top
     contacts.sort(key=lambda c: c["last_id"], reverse=True)
     return jsonify(contacts)
 
@@ -663,9 +608,6 @@ def api_contacts():
 @app.get("/api/chat")
 @require_basic_auth
 def api_chat():
-    """
-    Return chat history for a specific phone number.
-    """
     phone = request.args.get("phone")
     if not phone:
         return jsonify([])
@@ -682,7 +624,6 @@ def api_chat():
         if peer == phone:
             msgs.append(m)
 
-    # Sort ascending by id → oldest at top, newest at bottom
     msgs.sort(key=lambda x: x["id"])
     return jsonify(msgs)
 
@@ -702,7 +643,6 @@ INBOX_HTML = """
    --wa-dark:#075E54;
    --wa-light:#DCF8C6;
 
-   /* DARK defaults */
    --page-bg:#0b141a;
    --app-bg:#111b21;
    --sidebar-bg:#111b21;
@@ -723,7 +663,6 @@ INBOX_HTML = """
    --red:#ef4444;
  }
 
- /* LIGHT theme overrides */
  [data-theme="light"]{
    --wa-dark:#008069;
    --wa-light:#e7ffdb;
@@ -808,16 +747,13 @@ INBOX_HTML = """
    filter:brightness(1.1);
  }
 
+ /* FULL-WIDTH layout */
  .outer-wrap{
    height:calc(100vh - 46px);
-   display:flex;
-   justify-content:center;
-   align-items:stretch;
    padding:12px;
  }
  .app{
    width:100%;
-   max-width:1200px;
    height:100%;
    background:var(--app-bg);
    border-radius:8px;
@@ -825,6 +761,7 @@ INBOX_HTML = """
    display:flex;
    border:1px solid var(--border-soft);
  }
+
  .sidebar{
    width:32%;
    min-width:260px;
@@ -1059,7 +996,6 @@ INBOX_HTML = """
    filter:brightness(.95);
  }
  .small{font-size:11px;color:var(--wa-text-soft);}
- /* Bulk panel */
  .bulk-panel{
    background:var(--bulk-panel-bg);
    border-top:1px solid var(--border-strong);
@@ -1365,7 +1301,6 @@ INBOX_HTML = """
       const data = await fetchJSON('/api/contacts');
       contacts = data || [];
       applyFilter();
-      // Auto-select first contact
       if(contacts.length && !activePhone){
         const first = contacts[0];
         const firstEl = contactListEl.querySelector('.contact');
@@ -1392,6 +1327,10 @@ INBOX_HTML = """
   }
 
   searchInput.addEventListener('input', applyFilter);
+
+  function hasArabic(text){
+    return /[\\u0600-\\u06FF]/.test(text || '');
+  }
 
   async function loadChat(phone){
     if(!phone) return;
@@ -1424,11 +1363,14 @@ INBOX_HTML = """
             const caption = document.createElement('div');
             caption.textContent = m.preview;
             caption.style.marginTop = '2px';
+            caption.setAttribute('dir', hasArabic(m.preview) ? 'rtl' : 'ltr');
             mediaDiv.appendChild(caption);
           }
           bubble.appendChild(mediaDiv);
         }else{
-          bubble.textContent = m.preview || '';
+          const text = m.preview || '';
+          bubble.textContent = text;
+          bubble.setAttribute('dir', hasArabic(text) ? 'rtl' : 'ltr');
         }
 
         const time = document.createElement('div');
@@ -1484,7 +1426,6 @@ INBOX_HTML = """
             components = [parsed];
           }
         }catch(e){
-          // ignore parse error – fall back to header only
         }
       }
 
@@ -1520,7 +1461,6 @@ INBOX_HTML = """
       }
       chatText.value = '';
       showToast('Message sent ✓', false);
-      // reload chat to show latest + update sidebar
       setTimeout(()=>{ loadChat(activePhone); loadContacts(); },400);
     }catch(e){
       console.error('send error', e);
@@ -1528,7 +1468,6 @@ INBOX_HTML = """
     }
   });
 
-  // THEME TOGGLE
   const themeToggleBtn = document.getElementById('themeToggle');
   function applyTheme(theme){
     document.documentElement.setAttribute('data-theme', theme);
@@ -1548,10 +1487,7 @@ INBOX_HTML = """
     localStorage.setItem('waTheme', next);
   });
 
-  // Initial load
   loadContacts();
-
-  // Periodic refresh: contacts + active chat
   setInterval(()=>{
     loadContacts();
     if (activePhone) {
@@ -1594,25 +1530,20 @@ def inbox_send():
 
     try:
         if kind == "text":
-            # Simple text message
             do_send(to, kind="text", text=raw_text)
         else:
-            # TEMPLATE
             components = None
 
-            # 1) Advanced mode: user pasted full components JSON in textarea
             if raw_text:
                 try:
                     loaded = json.loads(raw_text)
                     if isinstance(loaded, list):
                         components = loaded
                     elif isinstance(loaded, dict):
-                        # allow a single component object
                         components = [loaded]
                 except Exception:
                     components = None
 
-            # 2) Simple mode: header_type + header_url → build header component
             if components is None and header_type in ("image", "video") and header_url:
                 components = [
                     {
@@ -1663,11 +1594,9 @@ def inbox_bulk():
                 per_call_sleep=float(sleep or BULK_SLEEP_DEFAULT)
             )
         else:
-            # TEMPLATE
             payload_str = (request.form.get("payload") or "").strip()
             components = None
 
-            # 1) Advanced mode: full components JSON in payload textarea
             if payload_str:
                 try:
                     loaded = json.loads(payload_str)
@@ -1678,7 +1607,6 @@ def inbox_bulk():
                 except Exception:
                     components = None
 
-            # 2) Simple mode: header_type + URL
             if components is None and header_type in ("image", "video") and header_url:
                 components = [
                     {
@@ -1705,7 +1633,6 @@ def inbox_bulk():
                 concurrency=int(conc or BULK_CONCURRENCY_DEFAULT),
                 per_call_sleep=float(sleep or BULK_SLEEP_DEFAULT)
             )
-        # summarize
         ok = sum(1 for r in results if r.get("ok"))
         failed = len(results) - ok
         return redirect(url_for('inbox', dir='out', sent='1' if ok else None, err=None if failed==0 else f"{failed} failed"))
@@ -1716,17 +1643,6 @@ def inbox_bulk():
 @app.post("/bulk")
 @require_basic_auth
 def bulk_api():
-    """
-    JSON:
-    {
-      "to": ["+9617xxxxxx", "+9613yyyyyy"],
-      "kind": "template",
-      "text": "Hi",                               # when kind=text
-      "template": {"name":"hello_world1","language":"en","components":[...]},
-      "concurrency": 5,
-      "per_call_sleep": 0.1
-    }
-    """
     p = request.get_json(force=True, silent=False)
     numbers = p.get("to") or []
     if not isinstance(numbers, list) or not numbers:
@@ -1762,7 +1678,6 @@ def bulk_api():
 def quick():
     to = request.args.get("to")
     raw_msg = request.args.get("msg", "👍")
-    # Decode URL-encoded message (so 👍 and ACK render correctly)
     msg = urllib.parse.unquote(raw_msg)
     redir = request.args.get("redir", "in")
     try:
@@ -1808,12 +1723,6 @@ def health():
 @app.post("/send")
 @require_basic_auth
 def send_api():
-    """
-    JSON body:
-      { "to": "9617xxxxxx", "kind": "text", "text": "hi" }
-      or
-      { "to": "9617xxxxxx", "kind": "template", "template": { "name":"xyz", "language":"en", ... } }
-    """
     p = request.get_json(force=True, silent=False)
     to = p.get("to")
     kind = p.get("kind","text")
@@ -1853,8 +1762,7 @@ def export_csv():
     rows = fetch_messages(2000, direction=direction)
 
     buf = io.StringIO()
-    # Write UTF-8 BOM so Excel correctly detects encoding (Arabic, etc.)
-    buf.write("\ufeff")
+    buf.write("\\ufeff")
 
     writer = csv.writer(buf)
     writer.writerow([
@@ -1873,7 +1781,7 @@ def export_csv():
     ])
 
     for m in rows:
-        body = (m.get("body") or "").replace("\n", " ").replace("\r", " ")
+        body = (m.get("body") or "").replace("\\n", " ").replace("\\r", " ")
         writer.writerow([
             m.get("id"),
             fmt_gmt2(m.get("created_at", "")),
