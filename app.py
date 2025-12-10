@@ -29,7 +29,9 @@ GRAPH_BASE   = "https://graph.facebook.com/v21.0"
 # Allow sending template components (e.g., Flow buttons) when explicitly enabled.
 # Default keeps previous safety behavior of stripping components to avoid common
 # Graph API validation errors.
-ALLOW_TEMPLATE_COMPONENTS = os.getenv("WA_ALLOW_TEMPLATE_COMPONENTS", "0") == "1"
+ALLOW_TEMPLATE_COMPONENTS = True
+print("DEBUG: ALLOW_TEMPLATE_COMPONENTS =", ALLOW_TEMPLATE_COMPONENTS, flush=True)
+
 
 INBOX_USER = os.getenv("INBOX_USER", "admin")
 INBOX_PASS = os.getenv("INBOX_PASS")              # enable auth when set
