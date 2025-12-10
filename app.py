@@ -290,33 +290,7 @@ def build_flow_preview(body):
     else:
         return f"FLOW: {status}"
 
-def _deep_decode_unicode_escapes(obj):
-    """
-    Recursively walk dicts/lists/strings and turn '\\u0627...' style
-    sequences into real Unicode characters (Arabic, etc.).
 
-    We only try decoding when the string actually contains '\\u'.
-    """
-    if isinstance(obj, str):
-        if "\\u" in obj:
-            try:
-                # This turns literal backslash-u sequences into real characters
-                return obj.encode("utf-8").decode("unicode_escape")
-            except Exception:
-                return obj
-        return obj
-
-    if isinstance(obj, dict):
-        return {k: _deep_decode_unicode_escapes(v) for k, v in obj.items()}
-
-    if isinstance(obj, list):
-        return [_deep_decode_unicode_escapes(v) for v in obj]
-
-    return obj
-
-
-
-# newly added to decode the utf-8 unicode to change unicode to arabic
 # ---------- FLOW UTF-8 UNICODE DECODER + BODY PARSER ----------
 
 def _deep_decode_unicode_escapes(obj):
@@ -414,7 +388,6 @@ def _decode_flow_body(raw_body):
     obj = _deep_decode_unicode_escapes(obj)
 
     return parsed, obj
-
 
 
 def _massage_messages(rows, base_url):
@@ -735,10 +708,12 @@ def webhook_inbound():
 
                         parsed_response = {}
                         if isinstance(rj, str):
+                            # Extra safety: decode any \uXXXX before json.loads
+                            rj_decoded = _deep_decode_unicode_escapes(rj)
                             try:
-                                parsed_response = json.loads(rj) if rj.strip() else {}
+                                parsed_response = json.loads(rj_decoded) if rj_decoded.strip() else {}
                             except Exception:
-                                parsed_response = {"raw_response_json": rj}
+                                parsed_response = {"raw_response_json": rj_decoded}
                         elif isinstance(rj, dict):
                             parsed_response = rj
 
@@ -1608,7 +1583,7 @@ INBOX_HTML = """
   searchInput.addEventListener('input', applyFilter);
 
   function hasArabic(text){
-    return /[\\u0600-\\u06FF]/.test(text || '');
+    return /[\u0600-\u06FF]/.test(text || '');
   }
 
   async function loadChat(phone){
