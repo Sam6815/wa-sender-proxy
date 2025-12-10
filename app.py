@@ -957,20 +957,24 @@ INBOX_HTML = """
    padding:16px;
  }
  .chat-messages{
-   flex:1;
-   padding:12px;
-   background:var(--chat-messages-bg);
-   background-size:400px;
-   overflow-y:auto;
-   display:flex;
-   flex-direction:column;
-   gap:4px;
- }
+  flex: 1;
+  padding: 12px;
+  background: var(--chat-messages-bg);
+  background-size: 400px;
+  overflow-y: auto;
+  overflow-x: hidden;      /* <- prevent horizontal scroll */
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-width: 100%;         /* <- clamp to chat column */
+}
+
  .msg-row{
-   display:flex;
-   width:100%;
-   margin-bottom:2px;
- }
+  display: flex;
+  width: 100%;
+  max-width: 100%;
+}
+
  .msg.in{
    margin-right:auto;
    background:var(--sidebar-header-bg);
@@ -982,15 +986,18 @@ INBOX_HTML = """
    color:#111827;
  }
  .msg{
-   max-width:min(60%, 520px);
-   width:fit-content;
-   padding:6px 8px;
-   border-radius:10px;
-   font-size:13px;
-   position:relative;
-   white-space:pre-wrap;
-   word-wrap:break-word;
- }
+  max-width: 100%;          /* previously min(60%, 520px) */
+  width: fit-content;
+  padding: 6px 8px;
+  border-radius: 10px;
+  font-size: 13px;
+  position: relative;
+
+  white-space: pre-wrap;
+  word-break: break-word;   /* break long tokens with no spaces */
+  overflow-wrap: anywhere;  /* extra safety for very long JSON keys */
+}
+
  .msg-time{
    font-size:10px;
    opacity:.7;
