@@ -808,12 +808,16 @@ INBOX_HTML = """
    filter:brightness(1.1);
  }
 
- .outer-wrap{
+.outer-wrap{
    height:calc(100vh - 46px);
    padding:12px;
- }
+   display:flex;
+   justify-content:center;   /* center the app horizontally */
+   align-items:stretch;
+}
  .app{
    width:100%;
+   max-width:1200px;
    height:100%;
    background:var(--app-bg);
    border-radius:8px;
