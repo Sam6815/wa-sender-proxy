@@ -144,7 +144,7 @@ def fetch_messages(limit=200, direction=None, since_id=None):
     with get_conn() as c:
         if DATABASE_URL:
             import psycopg2.extras
-            cur = c.cursor(cursor_factory=psycopg2.extras.DictCursor)
+            cur = c.cursor(cursor_factory=psygopg2.extras.DictCursor)
             cur.execute(sql, params)
             rows = cur.fetchall()
             return [dict(r) for r in rows]
@@ -249,6 +249,58 @@ def build_ack_message(profile_name=None):
 def build_ack_message_encoded(profile_name=None):
     return urllib.parse.quote(build_ack_message(profile_name))
 
+
+# ---------- FLOW PREVIEW HELPER (handles old + new formats) ----------
+def build_flow_preview(body):
+    """
+    Try to build a short human preview for any Flow (nfm_reply) payload.
+
+    Supports:
+      1) body = JSON string: {"nfm_reply": {...}, "parsed_response": {...}}
+      2) body = JSON string: {"type":"nfm_reply","nfm_reply": {...}}
+      3) body = nfm_reply dict itself.
+    Returns: "FLOW: Sent – { ... }" or None if not parseable.
+    """
+    if body is None:
+        return None
+
+    # Normalize to dict
+    if isinstance(body, str):
+        try:
+            obj = json.loads(body)
+        except Exception:
+            return None
+    elif isinstance(body, dict):
+        obj = body
+    else:
+        return None
+
+    # If top-level has nfm_reply, prefer it
+    nfm = obj.get("nfm_reply") or obj
+    parsed = obj.get("parsed_response")
+
+    # If parsed_response missing, decode response_json
+    if not parsed:
+        rj = nfm.get("response_json")
+        if isinstance(rj, str):
+            try:
+                parsed = json.loads(rj) if rj.strip() else {}
+            except Exception:
+                parsed = {"raw_response_json": rj}
+        elif isinstance(rj, dict):
+            parsed = rj
+
+    status = (nfm.get("body") or nfm.get("name") or "Flow reply").strip()
+
+    if isinstance(parsed, dict):
+        short_txt = json.dumps(parsed, ensure_ascii=False)
+        if len(short_txt) > 200:
+            short_txt = short_txt[:200] + "…"
+        return f"FLOW: {status} – {short_txt}"
+    else:
+        return f"FLOW: {status}"
+
+
 def _massage_messages(rows, base_url):
     out = []
     base = (base_url or "").rstrip("/")
@@ -264,30 +316,25 @@ def _massage_messages(rows, base_url):
         m["ack_msg"] = ack_msg
         m["ack_msg_enc"] = build_ack_message_encoded(profile_name)
 
+        raw_body = m.get("body")
         t = (m.get("type") or "").lower()
 
-        # FLOW reply preview (nfm_reply)
-        if t == "nfm_reply" and m.get("body"):
-            try:
-                raw = m["body"]
-                obj = json.loads(raw) if isinstance(raw, str) else (raw or {})
-                nfm = obj.get("nfm_reply") or obj
-                parsed = obj.get("parsed_response")
+        # FIRST: if it's a Flow message (new or old stored format), build
+        # a nice Unicode preview with decoded Arabic fields.
+        flow_preview = None
+        try:
+            if t == "nfm_reply" or (isinstance(raw_body, str) and '"nfm_reply"' in raw_body):
+                flow_preview = build_flow_preview(raw_body)
+        except Exception:
+            flow_preview = None
 
-                status = (nfm.get("body") or nfm.get("name") or "Flow reply").strip()
-                if parsed:
-                    short = json.dumps(parsed, ensure_ascii=False)
-                    if len(short) > 160:
-                        short = short[:160] + "…"
-                    m["preview"] = f"FLOW: {status} – {short}"
-                else:
-                    m["preview"] = f"FLOW: {status}"
-            except Exception:
-                m["preview"] = (m.get("body") or "")[:200] + "…"
+        if flow_preview:
+            m["preview"] = flow_preview
 
-        elif t in {"image","audio","video","document","sticker"} and m.get("body"):
+        # Media messages
+        elif t in {"image","audio","video","document","sticker"} and raw_body:
             try:
-                obj = json.loads(m["body"]) if isinstance(m["body"], str) else (m["body"] or {})
+                obj = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
                 payload = obj.get(t) if isinstance(obj, dict) and isinstance(obj.get(t), dict) else obj
                 mid = (payload or {}).get("id")
                 caption = (payload or {}).get("caption") if t == "image" else None
@@ -298,8 +345,10 @@ def _massage_messages(rows, base_url):
                 if isinstance(m["preview"], str) and len(m["preview"]) > 1500:
                     m["preview"] = m["preview"][:1500] + "…"
         else:
+            # Plain text / template body JSON etc.
             if isinstance(m["preview"], str) and len(m["preview"]) > 1500:
                 m["preview"] = m["preview"][:1500] + "…"
+
         out.append(m)
     return out
 
@@ -522,14 +571,12 @@ def webhook_inbound():
                         body = inbound_text or ""
 
                     elif mtype == "nfm_reply":
-                        # Flow submission: response_json may contain \u0628... Arabic escapes
                         nfm = msg.get("nfm_reply") or {}
                         rj = nfm.get("response_json")
 
                         parsed_response = {}
                         if isinstance(rj, str):
                             try:
-                                # json.loads will decode \uXXXX into real Unicode (Arabic)
                                 parsed_response = json.loads(rj) if rj.strip() else {}
                             except Exception:
                                 parsed_response = {"raw_response_json": rj}
@@ -747,7 +794,6 @@ INBOX_HTML = """
    filter:brightness(1.1);
  }
 
- /* FULL-WIDTH layout */
  .outer-wrap{
    height:calc(100vh - 46px);
    padding:12px;
@@ -918,7 +964,8 @@ INBOX_HTML = """
    color:#111827;
  }
  .msg{
-   max-width:72%;
+   max-width:min(70%, 640px);
+   width:fit-content;
    padding:6px 8px;
    border-radius:10px;
    font-size:13px;
@@ -1329,7 +1376,7 @@ INBOX_HTML = """
   searchInput.addEventListener('input', applyFilter);
 
   function hasArabic(text){
-    return /[\\u0600-\\u06FF]/.test(text || '');
+    return /[\u0600-\u06FF]/.test(text || '');
   }
 
   async function loadChat(phone){
@@ -1643,6 +1690,17 @@ def inbox_bulk():
 @app.post("/bulk")
 @require_basic_auth
 def bulk_api():
+    """
+    JSON:
+    {
+      "to": ["+9617xxxxxx", "+9613yyyyyy"],
+      "kind": "template",
+      "text": "Hi",                               # when kind=text
+      "template": {"name":"hello_world1","language":"en","components":[...]},
+      "concurrency": 5,
+      "per_call_sleep": 0.1
+    }
+    """
     p = request.get_json(force=True, silent=False)
     numbers = p.get("to") or []
     if not isinstance(numbers, list) or not numbers:
@@ -1723,6 +1781,12 @@ def health():
 @app.post("/send")
 @require_basic_auth
 def send_api():
+    """
+    JSON body:
+      { "to": "9617xxxxxx", "kind": "text", "text": "hi" }
+      or
+      { "to": "9617xxxxxx", "kind": "template", "template": { "name":"xyz", "language":"en", ... } }
+    """
     p = request.get_json(force=True, silent=False)
     to = p.get("to")
     kind = p.get("kind","text")
@@ -1762,7 +1826,8 @@ def export_csv():
     rows = fetch_messages(2000, direction=direction)
 
     buf = io.StringIO()
-    buf.write("\\ufeff")
+    # UTF-8 BOM so Excel sees Arabic correctly
+    buf.write("\ufeff")
 
     writer = csv.writer(buf)
     writer.writerow([
@@ -1781,7 +1846,7 @@ def export_csv():
     ])
 
     for m in rows:
-        body = (m.get("body") or "").replace("\\n", " ").replace("\\r", " ")
+        body = (m.get("body") or "").replace("\n", " ").replace("\r", " ")
         writer.writerow([
             m.get("id"),
             fmt_gmt2(m.get("created_at", "")),
