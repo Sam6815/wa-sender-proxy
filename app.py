@@ -290,7 +290,6 @@ def build_flow_preview(body):
     else:
         return f"FLOW: {status}"
 
-
 # ---------- FLOW UTF-8 UNICODE DECODER + BODY PARSER ----------
 
 def _deep_decode_unicode_escapes(obj):
@@ -388,6 +387,7 @@ def _decode_flow_body(raw_body):
     obj = _deep_decode_unicode_escapes(obj)
 
     return parsed, obj
+
 
 
 def _massage_messages(rows, base_url):
@@ -703,23 +703,18 @@ def webhook_inbound():
                         body = inbound_text or ""
 
                     elif mtype == "nfm_reply":
+                        # Use robust decoder + preserve original nfm_reply + parsed_response
                         nfm = msg.get("nfm_reply") or {}
-                        rj = nfm.get("response_json")
-
-                        parsed_response = {}
-                        if isinstance(rj, str):
-                            # Extra safety: decode any \uXXXX before json.loads
-                            rj_decoded = _deep_decode_unicode_escapes(rj)
-                            try:
-                                parsed_response = json.loads(rj_decoded) if rj_decoded.strip() else {}
-                            except Exception:
-                                parsed_response = {"raw_response_json": rj_decoded}
-                        elif isinstance(rj, dict):
-                            parsed_response = rj
-
-                        flow_data = {
-                            "parsed_response": parsed_response,
+                        # Build a minimal flow object and decode it
+                        raw_flow_obj = {
+                            "type": "nfm_reply",
+                            "nfm_reply": nfm
                         }
+                        parsed, full_obj = _decode_flow_body(json.dumps(raw_flow_obj, ensure_ascii=False))
+
+                        flow_data = full_obj or raw_flow_obj
+                        if parsed:
+                            flow_data["parsed_response"] = parsed
 
                         print("FLOW SUBMISSION:", json.dumps(flow_data, ensure_ascii=False), flush=True)
                         body = json.dumps(flow_data, ensure_ascii=False)
@@ -1583,7 +1578,7 @@ INBOX_HTML = """
   searchInput.addEventListener('input', applyFilter);
 
   function hasArabic(text){
-    return /[\u0600-\u06FF]/.test(text || '');
+    return /[\\u0600-\\u06FF]/.test(text || '');
   }
 
   async function loadChat(phone){
@@ -2054,7 +2049,7 @@ def export_csv():
 
     buf = io.StringIO()
     # UTF-8 BOM so Excel sees Arabic correctly
-    buf.write("\\ufeff")
+    buf.write("\ufeff")
 
     writer = csv.writer(buf)
     writer.writerow([
@@ -2073,7 +2068,7 @@ def export_csv():
     ])
 
     for m in rows:
-        body = (m.get("body") or "").replace("\\n", " ").replace("\\r", " ")
+        body = (m.get("body") or "").replace("\n", " ").replace("\r", " ")
         writer.writerow([
             m.get("id"),
             fmt_gmt2(m.get("created_at", "")),
