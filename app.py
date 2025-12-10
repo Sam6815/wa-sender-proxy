@@ -293,6 +293,7 @@ def build_flow_preview(body):
 def _massage_messages(rows, base_url):
     out = []
     base = (base_url or "").rstrip("/")
+
     for m in rows:
         m = dict(m)
         m["created_fmt"] = fmt_gmt2(m.get("created_at", ""))
@@ -308,18 +309,40 @@ def _massage_messages(rows, base_url):
         raw_body = m.get("body")
         t = (m.get("type") or "").lower()
 
-        # FULL FLOW VIEW: show complete parsed_response as pretty JSON
+        # ---------- FLOW MESSAGES: show decoded, pretty JSON with Arabic ----------
         if t == "nfm_reply":
             try:
                 obj = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
-                parsed = obj.get("parsed_response") or obj.get("nfm_reply") or {}
-                m["preview"] = json.dumps(parsed, ensure_ascii=False, indent=2)
-            except Exception:
-                # fallback: leave raw body
-                pass
+                # 1) New format: we already stored parsed_response
+                parsed = obj.get("parsed_response")
 
-        # Media messages
-        elif t in {"image","audio","video","document","sticker"} and raw_body:
+                # 2) Old format: decode nested response_json under nfm_reply
+                if not parsed:
+                    nfm = obj.get("nfm_reply") or {}
+                    rj = nfm.get("response_json")
+                    if isinstance(rj, str):
+                        try:
+                            parsed = json.loads(rj) if rj.strip() else {}
+                        except Exception:
+                            parsed = {"raw_response_json": rj}
+                    elif isinstance(rj, dict):
+                        parsed = rj
+
+                # 3) Fallback: if still nothing, just show the whole obj
+                if isinstance(parsed, dict):
+                    # ensure_ascii=False => real Arabic instead of \u0627\u0644...
+                    m["preview"] = json.dumps(parsed, ensure_ascii=False, indent=2)
+                else:
+                    m["preview"] = json.dumps(obj, ensure_ascii=False, indent=2)
+            except Exception as e:
+                print("flow preview decode error:", e, flush=True)
+                if isinstance(raw_body, str) and len(raw_body) > 1500:
+                    m["preview"] = raw_body[:1500] + "…"
+                else:
+                    m["preview"] = raw_body or ""
+
+        # ---------- MEDIA MESSAGES ----------
+        elif t in {"image", "audio", "video", "document", "sticker"} and raw_body:
             try:
                 obj = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
                 payload = obj.get(t) if isinstance(obj, dict) and isinstance(obj.get(t), dict) else obj
@@ -331,12 +354,14 @@ def _massage_messages(rows, base_url):
             except Exception:
                 if isinstance(m["preview"], str) and len(m["preview"]) > 1500:
                     m["preview"] = m["preview"][:1500] + "…"
+
+        # ---------- PLAIN TEXT / TEMPLATE JSON ----------
         else:
-            # Plain text / template body JSON etc.
             if isinstance(m["preview"], str) and len(m["preview"]) > 1500:
                 m["preview"] = m["preview"][:1500] + "…"
 
         out.append(m)
+
     return out
 
 # Core send logic
