@@ -532,22 +532,32 @@ def auto_reply_for_text(text, profile_name=None):
 def webhook_inbound():
     data = request.get_json(force=True, silent=True) or {}
     print("WEBHOOK:", json.dumps(data, ensure_ascii=False), flush=True)
+
     if data.get("object") != "whatsapp_business_account":
         return jsonify(status="ignored"), 200
+
     try:
         for entry in (data.get("entry") or []):
             for ch in (entry.get("changes") or []):
                 value = ch.get("value") or {}
-                # Status updates
+
+                # -------- Status updates --------
                 for st in (value.get("statuses") or []):
                     conv = st.get("conversation") or {}
                     store_message(
-                        direction="status", wa_from=None, wa_to=st.get("recipient_id"),
-                        wa_id=st.get("id"), name=None, type="status",
-                        body=json.dumps(st, ensure_ascii=False), status=st.get("status"),
-                        conversation_id=conv.get("id"), conversation_category=conv.get("category"),
+                        direction="status",
+                        wa_from=None,
+                        wa_to=st.get("recipient_id"),
+                        wa_id=st.get("id"),
+                        name=None,
+                        type="status",
+                        body=json.dumps(st, ensure_ascii=False),
+                        status=st.get("status"),
+                        conversation_id=conv.get("id"),
+                        conversation_category=conv.get("category"),
                     )
-                # Inbound messages
+
+                # -------- Inbound messages --------
                 contacts = value.get("contacts") or [{}]
                 profile_name = (contacts[0].get("profile") or {}).get("name") if contacts else None
                 meta = value.get("metadata") or {}
@@ -555,44 +565,51 @@ def webhook_inbound():
                 for msg in (value.get("messages") or []):
                     mtype = msg.get("type")
 
-                    inbound_text = None
+                    inbound_text = None      # only used for auto-reply on plain text
+                    body = ""                # what we store into DB
+                    flow_data = None         # parsed nfm_reply data (if any)
+
                     if mtype == "text":
+                        # Normal text message
                         inbound_text = (msg.get("text") or {}).get("body", "")
-                        body = inbound_text
+                        body = inbound_text or ""
 
                     elif mtype == "nfm_reply":
-                        # Flow reply: parse response_json
+                        # Flow (native form) submission
                         nfm = msg.get("nfm_reply") or {}
-                        raw_rj = nfm.get("response_json")
-                        parsed = None
+                        rj = nfm.get("response_json")    # JSON string from Flow
                         try:
-                            if isinstance(raw_rj, str):
-                                parsed = json.loads(raw_rj)
+                            flow_data = json.loads(rj) if rj else {}
                         except Exception:
-                            parsed = None
-                        body = json.dumps(
-                            {
-                                "nfm_reply": nfm,
-                                "parsed_response": parsed,
-                            },
-                            ensure_ascii=False
-                        )
+                            flow_data = {"raw_response_json": rj}
+
+                        # Log parsed Flow data for debugging
+                        print("FLOW SUBMISSION:", json.dumps(flow_data, ensure_ascii=False), flush=True)
+
+                        # Store parsed flow payload as JSON in DB body
+                        body = json.dumps(flow_data, ensure_ascii=False)
 
                     else:
+                        # Everything else (image, audio, video, document, location, etc.)
                         body = json.dumps(msg.get(mtype, {}) or {}, ensure_ascii=False)
 
-                    # Store inbound message
+                    # Store inbound message (including Flow submissions)
                     store_message(
-                        direction="in", wa_from=msg.get("from"),
-                        wa_to=meta.get("display_phone_number"), wa_id=msg.get("id"),
-                        name=profile_name, type=mtype, body=body, status="received",
+                        direction="in",
+                        wa_from=msg.get("from"),
+                        wa_to=meta.get("display_phone_number"),
+                        wa_id=msg.get("id"),
+                        name=profile_name,
+                        type=mtype,
+                        body=body,
+                        status="received",
                         conversation_id=(msg.get("context") or {}).get("id"),
                         conversation_category=None,
                     )
 
-                    # --- AUTO REPLY LOGIC ---
+                    # -------- AUTO-REPLY LOGIC --------
+                    # For now, we only auto-reply to plain text messages.
                     try:
-                        # Only auto-reply to text messages for now
                         if inbound_text:
                             reply_text = auto_reply_for_text(inbound_text, profile_name=profile_name)
                             if reply_text:
@@ -600,10 +617,12 @@ def webhook_inbound():
                                 do_send(msg.get("from"), kind="text", text=reply_text)
                     except Exception as e:
                         print("Auto-reply failed:", e, flush=True)
+
     except Exception as e:
         print("Webhook parse error:", e, flush=True)
-    return jsonify(status="ok"), 200
 
+    return jsonify(status="ok"), 200
+    
 @app.get("/api/contacts")
 @require_basic_auth
 def api_contacts():
