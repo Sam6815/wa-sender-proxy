@@ -317,6 +317,33 @@ def _deep_decode_unicode_escapes(obj):
 
 
 # newly added to decode the utf-8 unicode to change unicode to arabic
+# ---------- FLOW UTF-8 UNICODE DECODER + BODY PARSER ----------
+
+def _deep_decode_unicode_escapes(obj):
+    """
+    Recursively walk dicts/lists/strings and turn '\\u0627...' style
+    sequences into real Unicode characters (Arabic, etc.).
+
+    We only try decoding when the string actually contains '\\u'.
+    """
+    if isinstance(obj, str):
+        if "\\u" in obj:
+            try:
+                # This turns literal backslash-u sequences into real characters
+                return obj.encode("utf-8").decode("unicode_escape")
+            except Exception:
+                return obj
+        return obj
+
+    if isinstance(obj, dict):
+        return {k: _deep_decode_unicode_escapes(v) for k, v in obj.items()}
+
+    if isinstance(obj, list):
+        return [_deep_decode_unicode_escapes(v) for v in obj]
+
+    return obj
+
+
 def _decode_flow_body(raw_body):
     """
     Try very hard to turn whatever is in messages.body for an nfm_reply
@@ -333,36 +360,37 @@ def _decode_flow_body(raw_body):
     if raw_body is None:
         return None, None
 
+    # First pass: if it's a string, decode any \uXXXX at the string level
     obj = raw_body
-
-    # 1) If it's a string, try 1 or 2 layers of json.loads
     if isinstance(obj, str):
+        # Decode \uXXXX sequences in the raw JSON string first
+        obj = _deep_decode_unicode_escapes(obj)
         s = obj.strip()
         try:
             if s.startswith("{") or s.startswith("["):
                 obj = json.loads(s)
                 # handle double-encoded JSON: result still a string that looks like JSON
                 if isinstance(obj, str):
-                    s2 = obj.strip()
+                    s2 = _deep_decode_unicode_escapes(obj.strip())
                     if s2.startswith("{") or s2.startswith("["):
                         obj = json.loads(s2)
         except Exception:
-            # Could not parse; give up and return None so caller can fallback to raw
+            # Could not parse; give up so caller can fallback to raw
             return None, None
 
-    # 2) If after that it's not a dict, we can't work with it
+    # If after that it's not a dict, we can't work with it
     if not isinstance(obj, dict):
         return None, None
 
-    # 3) New format: parsed_response already present
+    # New format: parsed_response already present
     parsed = obj.get("parsed_response")
     if isinstance(parsed, dict):
-        # Normalize any \\uXXXX sequences to real characters
+        # Deep-decode any \\uXXXX sequences inside the dict
         parsed = _deep_decode_unicode_escapes(parsed)
         obj = _deep_decode_unicode_escapes(obj)
         return parsed, obj
 
-    # 4) Look for response_json in various places
+    # Old-style: look for response_json in various places
     nfm = obj.get("nfm_reply") or obj
     rj = None
 
@@ -370,22 +398,23 @@ def _decode_flow_body(raw_body):
         rj = nfm.get("response_json") or obj.get("response_json")
 
     if isinstance(rj, str):
-        rj_s = rj.strip()
+        rj_s = _deep_decode_unicode_escapes(rj.strip())
         try:
             parsed = json.loads(rj_s) if rj_s else {}
         except Exception:
             # keep raw string if unparseable
-            parsed = {"raw_response_json": rj}
+            parsed = {"raw_response_json": rj_s}
     elif isinstance(rj, dict):
         parsed = rj
     else:
         parsed = {}
 
-    # FINAL: deep-decode any '\\uXXXX' sequences
+    # FINAL: deep-decode any '\\uXXXX' sequences in the parsed dict and full object
     parsed = _deep_decode_unicode_escapes(parsed)
     obj = _deep_decode_unicode_escapes(obj)
 
     return parsed, obj
+
 
 
 def _massage_messages(rows, base_url):
