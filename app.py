@@ -745,13 +745,19 @@ INBOX_HTML = """
    --wa-text:#111827;
    --wa-text-soft:#6b7280;
  }
+## herehere
+ html, body {
+  margin: 0;
+  padding: 0;
+  width: 100%;
+  max-width: 100%;
+  overflow-x: hidden;         /* prevent page-level horizontal scroll */
+  font-family: system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
+  background: var(--page-bg);
+  color: var(--wa-text);
+}
 
- *{box-sizing:border-box}
- body{
-   margin:0;
-   font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Arial,sans-serif;
-   background:var(--page-bg);
-   color:var(--wa-text);
+* { box-sizing: border-box; }
  }
  .topbar{
    background:var(--wa-dark);
