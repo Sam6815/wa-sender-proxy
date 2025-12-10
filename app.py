@@ -144,7 +144,7 @@ def fetch_messages(limit=200, direction=None, since_id=None):
     with get_conn() as c:
         if DATABASE_URL:
             import psycopg2.extras
-            cur = c.cursor(cursor_factory=psygopg2.extras.DictCursor)
+            cur = c.cursor(cursor_factory=psycopg2.extras.DictCursor)
             cur.execute(sql, params)
             rows = cur.fetchall()
             return [dict(r) for r in rows]
@@ -152,6 +152,7 @@ def fetch_messages(limit=200, direction=None, since_id=None):
             c.row_factory = sqlite3.Row
             cur = c.execute(sql, tuple(params))
             return [dict(r) for r in cur.fetchall()]
+
 
 # Initialize DB at import
 try:
