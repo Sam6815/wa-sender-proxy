@@ -288,7 +288,67 @@ def build_flow_preview(body):
         return f"FLOW: {status} – {short_txt}"
     else:
         return f"FLOW: {status}"
+# newly added to decode the utf-8 unicode to change unicode to arabic        
+def _decode_flow_body(raw_body):
+    """
+    Try very hard to turn whatever is in messages.body for an nfm_reply
+    into (parsed_response_dict, full_obj_dict).
 
+    Handles:
+      - {"nfm_reply": {...}, "parsed_response": {...}}
+      - {"type":"nfm_reply","nfm_reply":{"response_json":"{...}"}}
+      - {"response_json":"{...}"}
+      - double-encoded JSON strings.
+    """
+    if raw_body is None:
+        return None, None
+
+    obj = raw_body
+
+    # 1) If it's a string, try 1 or 2 layers of json.loads
+    if isinstance(obj, str):
+        s = obj.strip()
+        try:
+            if s.startswith("{") or s.startswith("["):
+                obj = json.loads(s)
+                # handle double-encoded JSON: result still a string that looks like JSON
+                if isinstance(obj, str):
+                    s2 = obj.strip()
+                    if s2.startswith("{") or s2.startswith("["):
+                        obj = json.loads(s2)
+        except Exception:
+            # Could not parse; give up and return None so caller can fallback to raw
+            return None, None
+
+    # 2) If after that it's not a dict, we can't work with it
+    if not isinstance(obj, dict):
+        return None, None
+
+    # 3) New format: parsed_response already present
+    parsed = obj.get("parsed_response")
+    if isinstance(parsed, dict):
+        return parsed, obj
+
+    # 4) Look for response_json in various places
+    nfm = obj.get("nfm_reply") or obj
+    rj = None
+
+    if isinstance(nfm, dict):
+        rj = nfm.get("response_json") or obj.get("response_json")
+
+    if isinstance(rj, str):
+        rj_s = rj.strip()
+        try:
+            parsed = json.loads(rj_s) if rj_s else {}
+        except Exception:
+            # keep raw string if unparseable
+            parsed = {"raw_response_json": rj}
+    elif isinstance(rj, dict):
+        parsed = rj
+    else:
+        parsed = {}
+
+    return parsed, obj
 
 def _massage_messages(rows, base_url):
     out = []
@@ -309,31 +369,20 @@ def _massage_messages(rows, base_url):
         raw_body = m.get("body")
         t = (m.get("type") or "").lower()
 
-        # ---------- FLOW MESSAGES: show decoded, pretty JSON with Arabic ----------
+        # ---------- FLOW MESSAGES: decode all shapes & show pretty Arabic ----------
         if t == "nfm_reply":
             try:
-                obj = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
-                # 1) New format: we already stored parsed_response
-                parsed = obj.get("parsed_response")
+                parsed, full_obj = _decode_flow_body(raw_body)
 
-                # 2) Old format: decode nested response_json under nfm_reply
-                if not parsed:
-                    nfm = obj.get("nfm_reply") or {}
-                    rj = nfm.get("response_json")
-                    if isinstance(rj, str):
-                        try:
-                            parsed = json.loads(rj) if rj.strip() else {}
-                        except Exception:
-                            parsed = {"raw_response_json": rj}
-                    elif isinstance(rj, dict):
-                        parsed = rj
-
-                # 3) Fallback: if still nothing, just show the whole obj
-                if isinstance(parsed, dict):
-                    # ensure_ascii=False => real Arabic instead of \u0627\u0644...
+                if isinstance(parsed, dict) and parsed:
+                    # Nice, decoded dict with Arabic text
                     m["preview"] = json.dumps(parsed, ensure_ascii=False, indent=2)
+                elif isinstance(full_obj, dict):
+                    # Fallback: at least show the dict (may still be useful)
+                    m["preview"] = json.dumps(full_obj, ensure_ascii=False, indent=2)
                 else:
-                    m["preview"] = json.dumps(obj, ensure_ascii=False, indent=2)
+                    # Ultimate fallback: raw body
+                    m["preview"] = raw_body or ""
             except Exception as e:
                 print("flow preview decode error:", e, flush=True)
                 if isinstance(raw_body, str) and len(raw_body) > 1500:
@@ -363,6 +412,7 @@ def _massage_messages(rows, base_url):
         out.append(m)
 
     return out
+
 
 # Core send logic
 def _lang_code_from(value, default="en"):
@@ -623,7 +673,7 @@ def webhook_inbound():
                             parsed_response = rj
 
                         flow_data = {
-                            "nfm_reply": nfm,
+                            #"nfm_reply": nfm,
                             "parsed_response": parsed_response,
                         }
 
