@@ -1045,6 +1045,52 @@ INBOX_HTML = """
    font-size:12px;
    min-height:60px;
    resize:vertical;
+/* Compose area must never be wider than the chat panel */
+.chat-compose {
+  max-width: 100%;
+  overflow-x: hidden;
+}
+
+/* The form itself */
+#chatSendForm {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 100%;
+}
+
+/* Row of controls (Text / Template, template name, lang, mode, header…) */
+.compose-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  width: 100%;               /* clamp to chat width */
+}
+
+/* Make every control shrink & wrap instead of forcing the row wider */
+.compose-row > * {
+  flex: 1 1 120px;           /* grow + shrink, base 120px */
+  min-width: 0;              /* allow shrinking below intrinsic width */
+  max-width: 100%;
+}
+
+/* Specific inputs/selects in the compose row */
+#tplName,
+#tplLang,
+#tplMode,
+#headerType,
+#headerUrl {
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* Textarea – just to be safe */
+.chat-textarea {
+  width: 100%;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
  }
  .send-btn{
    align-self:flex-end;
