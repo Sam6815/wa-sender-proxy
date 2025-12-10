@@ -191,6 +191,7 @@ def graph_post(path, payload):
     if not WA_PNID or not WA_TOKEN:
         raise RuntimeError("WA_PNID/WA_TOKEN not configured.")
 
+    # Strip components if not allowed globally
     if isinstance(payload, dict) and not ALLOW_TEMPLATE_COMPONENTS:
         try:
             if payload.get("type") == "template":
@@ -288,7 +289,8 @@ def build_flow_preview(body):
         return f"FLOW: {status} – {short_txt}"
     else:
         return f"FLOW: {status}"
-# newly added to decode the utf-8 unicode to change unicode to arabic        
+
+# newly added to decode the utf-8 unicode to change unicode to arabic
 def _decode_flow_body(raw_body):
     """
     Try very hard to turn whatever is in messages.body for an nfm_reply
@@ -375,7 +377,7 @@ def _massage_messages(rows, base_url):
                 parsed, full_obj = _decode_flow_body(raw_body)
 
                 if isinstance(parsed, dict) and parsed:
-                    # Nice, decoded dict with Arabic text
+                    # Nicely decoded dict with Arabic text
                     m["preview"] = json.dumps(parsed, ensure_ascii=False, indent=2)
                 elif isinstance(full_obj, dict):
                     # Fallback: at least show the dict (may still be useful)
@@ -458,8 +460,9 @@ def do_send(to, kind="text", text="", template=None):
         else:
             lang_value = {"code": lang_code}
 
-        # If Flow mode requested and no components defined, inject Flow button
         components = tpl.get("components")
+
+        # If Flow mode requested and no components defined, inject Flow button
         if flow_mode == "flow_button" and not components:
             if not ALLOW_TEMPLATE_COMPONENTS:
                 raise RuntimeError(
@@ -474,6 +477,8 @@ def do_send(to, kind="text", text="", template=None):
                         {
                             "type": "action",
                             "action": {
+                                # Let WA figure out the correct flow from the template;
+                                # you can later randomize or hash your own token if needed.
                                 "flow_token": "unused"
                             }
                         }
@@ -673,7 +678,6 @@ def webhook_inbound():
                             parsed_response = rj
 
                         flow_data = {
-                            #"nfm_reply": nfm,
                             "parsed_response": parsed_response,
                         }
 
@@ -887,7 +891,7 @@ INBOX_HTML = """
    height:calc(100vh - 46px);
    padding:12px;
    display:flex;
-   justify-content:center;   /* center the app horizontally */
+   justify-content:center;
    align-items:stretch;
 }
  .app{
@@ -1037,11 +1041,11 @@ INBOX_HTML = """
   background: var(--chat-messages-bg);
   background-size: 400px;
   overflow-y: auto;
-  overflow-x: hidden;      /* <- prevent horizontal scroll */
+  overflow-x: hidden;
   display: flex;
   flex-direction: column;
   gap: 4px;
-  max-width: 100%;         /* <- clamp to chat column */
+  max-width: 100%;
 }
 
  .msg-row{
@@ -1061,7 +1065,7 @@ INBOX_HTML = """
    color:#111827;
  }
  .msg{
-  max-width: 100%;          /* previously min(60%, 520px) */
+  max-width: 100%;
   width: fit-content;
   padding: 6px 8px;
   border-radius: 10px;
@@ -1069,8 +1073,8 @@ INBOX_HTML = """
   position: relative;
 
   white-space: pre-wrap;
-  word-break: break-word;   /* break long tokens with no spaces */
-  overflow-wrap: anywhere;  /* extra safety for very long JSON keys */
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
  .msg-time{
@@ -1127,53 +1131,54 @@ INBOX_HTML = """
    font-size:12px;
    min-height:60px;
    resize:vertical;
-/* Compose area must never be wider than the chat panel */
-.chat-compose {
-  max-width: 100%;
-  overflow-x: hidden;
-}
-
-/* The form itself */
-#chatSendForm {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-width: 100%;
-}
-
-/* Row of controls (Text / Template, template name, lang, mode, header…) */
-.compose-row {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  width: 100%;               /* clamp to chat width */
-}
-
-/* Make every control shrink & wrap instead of forcing the row wider */
-.compose-row > * {
-  flex: 1 1 120px;           /* grow + shrink, base 120px */
-  min-width: 0;              /* allow shrinking below intrinsic width */
-  max-width: 100%;
-}
-
-/* Specific inputs/selects in the compose row */
-#tplName,
-#tplLang,
-#tplMode,
-#headerType,
-#headerUrl {
-  min-width: 0;
-  max-width: 100%;
-}
-
-/* Textarea – just to be safe */
-.chat-textarea {
-  width: 100%;
-  max-width: 100%;
-  box-sizing: border-box;
-}
-
  }
+
+ /* Compose area must never be wider than the chat panel */
+ .chat-compose {
+   max-width: 100%;
+   overflow-x: hidden;
+ }
+
+ /* The form itself */
+ #chatSendForm {
+   display: flex;
+   flex-direction: column;
+   gap: 6px;
+   max-width: 100%;
+ }
+
+ /* Row of controls (Text / Template, template name, lang, mode, header…) */
+ .compose-row {
+   display: flex;
+   flex-wrap: wrap;
+   gap: 6px;
+   width: 100%;
+ }
+
+ /* Make every control shrink & wrap instead of forcing the row wider */
+ .compose-row > * {
+   flex: 1 1 120px;
+   min-width: 0;
+   max-width: 100%;
+ }
+
+ /* Specific inputs/selects in the compose row */
+ #tplName,
+ #tplLang,
+ #tplMode,
+ #headerType,
+ #headerUrl {
+   min-width: 0;
+   max-width: 100%;
+ }
+
+ /* Textarea – just to be safe */
+ .chat-textarea {
+   width: 100%;
+   max-width: 100%;
+   box-sizing: border-box;
+ }
+
  .send-btn{
    align-self:flex-end;
    background:var(--wa-green);
@@ -1349,7 +1354,7 @@ INBOX_HTML = """
             <input id="headerUrl" placeholder="https:// header media URL" style="flex:1;min-width:120px">
           </div>
           <textarea id="chatText" class="chat-textarea"
-            placeholder="Type a message (for text) OR JSON components for advanced templates. Leave empty for normal / flow mode."></textarea>
+            placeholder="For Normal templates: optional components JSON. For Flow templates: leave empty and just choose Mode: Flow button. For text: message body."></textarea>
           <div class="small">
             For Flow templates: just choose Mode = Flow button, no need to paste JSON.
           </div>
@@ -1400,7 +1405,7 @@ INBOX_HTML = """
               </div>
             </div>
             <textarea name="payload"
-              placeholder='For templates: optional JSON components body. Usually leave empty for Normal/Flow. For text: message body.'></textarea>
+              placeholder='For Normal templates: optional JSON components body. For Flow templates: leave this empty and just select Mode: Flow button. For text: message body.'></textarea>
             <button type="submit">Send Bulk</button>
             <div class="small">Note: Marketing/out-of-session must use approved templates.</div>
           </form>
@@ -1625,13 +1630,16 @@ INBOX_HTML = """
         return;
       }
       let template = { name: name, language: lang };
+
+      // Flow mode: no need to send user JSON
       if(mode === 'flow'){
         template.flow_mode = 'flow_button';
       }
 
       let components = null;
 
-      if(text){
+      // Only parse JSON when NOT in flow mode – to avoid mistakes with wrong structure
+      if(mode !== 'flow' && text){
         try{
           const parsed = JSON.parse(text);
           if(Array.isArray(parsed)){
@@ -1643,7 +1651,8 @@ INBOX_HTML = """
         }
       }
 
-      if(!components && hType && hUrl && hType !== 'flow'){
+      // Header media if provided and not using flow mode
+      if(!components && mode !== 'flow' && hType && hUrl){
         components = [
           {
             type:'header',
@@ -1749,7 +1758,7 @@ def inbox_send():
         else:
             components = None
 
-            if raw_text:
+            if tpl_mode != "flow" and raw_text:
                 try:
                     loaded = json.loads(raw_text)
                     if isinstance(loaded, list):
@@ -1759,7 +1768,7 @@ def inbox_send():
                 except Exception:
                     components = None
 
-            if components is None and header_type in ("image", "video") and header_url:
+            if components is None and tpl_mode != "flow" and header_type in ("image", "video") and header_url:
                 components = [
                     {
                         "type": "header",
@@ -1815,7 +1824,8 @@ def inbox_bulk():
             payload_str = (request.form.get("payload") or "").strip()
             components = None
 
-            if payload_str:
+            # Only parse JSON for normal templates; Flow mode handled automatically
+            if tpl_mode != "flow" and payload_str:
                 try:
                     loaded = json.loads(payload_str)
                     if isinstance(loaded, list):
@@ -1825,7 +1835,7 @@ def inbox_bulk():
                 except Exception:
                     components = None
 
-            if components is None and header_type in ("image", "video") and header_url:
+            if components is None and tpl_mode != "flow" and header_type in ("image", "video") and header_url:
                 components = [
                     {
                         "type": "header",
