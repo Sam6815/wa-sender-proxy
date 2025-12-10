@@ -191,6 +191,7 @@ def graph_post(path, payload):
     if not WA_PNID or not WA_TOKEN:
         raise RuntimeError("WA_PNID/WA_TOKEN not configured.")
 
+    # Strip components unless explicitly allowed
     if isinstance(payload, dict) and not ALLOW_TEMPLATE_COMPONENTS:
         try:
             if payload.get("type") == "template":
@@ -251,16 +252,14 @@ def build_ack_message_encoded(profile_name=None):
     return urllib.parse.quote(build_ack_message(profile_name))
 
 
-# ---------- FLOW PREVIEW HELPER (handles old + new formats) ----------
+# ---------- FLOW PREVIEW HELPER (FULL submission, multi-line) ----------
 def build_flow_preview(body):
     """
-    Try to build a short human preview for any Flow (nfm_reply) payload.
+    Build a FULL human-readable preview for any Flow (nfm_reply) payload.
 
-    Supports:
-      1) body = JSON string: {"nfm_reply": {...}, "parsed_response": {...}}
-      2) body = JSON string: {"type":"nfm_reply","nfm_reply": {...}}
-      3) body = nfm_reply dict itself.
-    Returns: "FLOW: Sent – { ... }" or None if not parseable.
+    - Decodes Arabic properly.
+    - Shows each key/value on its own line.
+    - Does NOT truncate (except a very high safety cap).
     """
     if body is None:
         return None
@@ -270,17 +269,17 @@ def build_flow_preview(body):
         try:
             obj = json.loads(body)
         except Exception:
-            return None
+            # fallback: just show raw string (capped)
+            return body[:4000]
     elif isinstance(body, dict):
         obj = body
     else:
-        return None
+        return str(body)[:4000]
 
-    # If top-level has nfm_reply, prefer it
     nfm = obj.get("nfm_reply") or obj
-    parsed = obj.get("parsed_response")
+    parsed = obj.get("parsed_response") or {}
 
-    # If parsed_response missing, decode response_json
+    # If parsed_response missing, decode response_json directly
     if not parsed:
         rj = nfm.get("response_json")
         if isinstance(rj, str):
@@ -293,13 +292,17 @@ def build_flow_preview(body):
 
     status = (nfm.get("body") or nfm.get("name") or "Flow reply").strip()
 
-    if isinstance(parsed, dict):
-        short_txt = json.dumps(parsed, ensure_ascii=False)
-        if len(short_txt) > 200:
-            short_txt = short_txt[:200] + "…"
-        return f"FLOW: {status} – {short_txt}"
+    # Build multi-line text
+    if isinstance(parsed, dict) and parsed:
+        lines = []
+        for k, v in parsed.items():
+            if k == "flow_token":
+                continue
+            lines.append(f"{k}: {v}")
+        full_text = "\n".join(lines)
+        return f"FLOW ({status}):\n{full_text}"[:4000]
     else:
-        return f"FLOW: {status}"
+        return f"FLOW ({status}): {json.dumps(parsed, ensure_ascii=False)}"[:4000]
 
 
 def _massage_messages(rows, base_url):
@@ -320,8 +323,7 @@ def _massage_messages(rows, base_url):
         raw_body = m.get("body")
         t = (m.get("type") or "").lower()
 
-        # FIRST: if it's a Flow message (new or old stored format), build
-        # a nice Unicode preview with decoded Arabic fields.
+        # FLOW: build full multi-line preview
         flow_preview = None
         try:
             if t == "nfm_reply" or (isinstance(raw_body, str) and '"nfm_reply"' in raw_body):
@@ -798,6 +800,7 @@ INBOX_HTML = """
  .outer-wrap{
    height:calc(100vh - 46px);
    padding:12px;
+   display:flex;
  }
  .app{
    width:100%;
@@ -972,7 +975,8 @@ INBOX_HTML = """
    font-size:13px;
    position:relative;
    white-space:pre-wrap;
-   word-wrap:break-word;
+   word-break:break-word;
+   overflow-wrap:anywhere;
  }
  .msg-time{
    font-size:10px;
@@ -1188,18 +1192,26 @@ INBOX_HTML = """
               <option value="template">Template</option>
             </select>
             <input id="tplName" placeholder="template name (if template)">
-            <input id="tplLang" placeholder="en" value="en" style="max-width:60px">
+            <select id="tplLang" style="max-width:80px">
+              <option value="en" selected>EN</option>
+              <option value="ar">AR</option>
+            </select>
             <select id="headerType">
               <option value="">Header: none</option>
               <option value="image">Header: image URL</option>
               <option value="video">Header: video URL</option>
             </select>
             <input id="headerUrl" placeholder="https:// header media URL" style="flex:1;min-width:120px">
+            <input id="flowId" placeholder="Flow ID (optional)" style="max-width:180px">
+            <label class="small" style="display:flex;align-items:center;gap:4px;">
+              <input type="checkbox" id="flowEnable">
+              Flow button
+            </label>
           </div>
           <textarea id="chatText" class="chat-textarea"
             placeholder="Type a message (for text) OR JSON components for advanced templates."></textarea>
           <div class="small">
-            For templates: you can paste components JSON or just choose a header type + URL above for media headers.
+            For templates: you can paste components JSON, or just use Header / Flow controls above.
           </div>
           <button type="submit" class="send-btn">Send</button>
         </form>
@@ -1224,7 +1236,10 @@ INBOX_HTML = """
                 <label class="small">Template name</label>
                 <input name="tpl_name" placeholder="hello_world1">
                 <label class="small">Language</label>
-                <input name="tpl_lang" value="en">
+                <select name="tpl_lang">
+                  <option value="en" selected>EN</option>
+                  <option value="ar">AR</option>
+                </select>
                 <label class="small">Header type</label>
                 <select name="header_type">
                   <option value="">Header: none</option>
@@ -1233,6 +1248,11 @@ INBOX_HTML = """
                 </select>
                 <label class="small">Header URL</label>
                 <input name="header_url" placeholder="https://...">
+                <label class="small">Flow ID (optional)</label>
+                <input name="flow_id" placeholder="Flow ID">
+                <label class="small">
+                  <input type="checkbox" name="flow_enable" value="1"> Flow button
+                </label>
                 <label class="small">Concurrency</label>
                 <input name="concurrency" value="5" type="number" min="1" max="20">
                 <label class="small">Per-call sleep (sec)</label>
@@ -1270,6 +1290,8 @@ INBOX_HTML = """
   const tplLang = document.getElementById('tplLang');
   const headerType = document.getElementById('headerType');
   const headerUrl = document.getElementById('headerUrl');
+  const flowIdInput = document.getElementById('flowId');
+  const flowEnable = document.getElementById('flowEnable');
   const chatText = document.getElementById('chatText');
   const chatSendForm = document.getElementById('chatSendForm');
 
@@ -1377,7 +1399,7 @@ INBOX_HTML = """
   searchInput.addEventListener('input', applyFilter);
 
   function hasArabic(text){
-    return /[\u0600-\u06FF]/.test(text || '');
+    return /[\\u0600-\\u06FF]/.test(text || '');
   }
 
   async function loadChat(phone){
@@ -1445,9 +1467,11 @@ INBOX_HTML = """
     const kind = chatKind.value || 'text';
     const text = (chatText.value || '').trim();
     const name = tplName.value.trim();
-    const lang = tplLang.value.trim() || 'en';
+    const lang = tplLang.value || 'en';
     const hType = (headerType.value || '').trim().toLowerCase();
     const hUrl = (headerUrl.value || '').trim();
+    const flowId = (flowIdInput.value || '').trim();
+    const flowOn = flowEnable.checked;
 
     let payload = { to: activePhone, kind: kind };
 
@@ -1465,6 +1489,7 @@ INBOX_HTML = """
       let template = { name: name, language: lang };
       let components = null;
 
+      // If user pasted components JSON, keep it
       if(text){
         try{
           const parsed = JSON.parse(text);
@@ -1477,18 +1502,40 @@ INBOX_HTML = """
         }
       }
 
-      if(!components && hType && hUrl){
-        components = [
-          {
-            type:'header',
-            parameters:[
-              {
-                type:hType,
-                [hType]:{ link:hUrl }
-              }
-            ]
-          }
-        ];
+      if(!components){
+        components = [];
+      }
+
+      // Optional header component
+      if(hType && hUrl){
+        components.push({
+          type:'header',
+          parameters:[
+            {
+              type:hType,
+              [hType]:{ link:hUrl }
+            }
+          ]
+        });
+      }
+
+      // Optional Flow button component
+      if(flowOn && flowId){
+        components.push({
+          type:'button',
+          sub_type:'flow',
+          index:'0',
+          parameters:[
+            {
+              type:'flow',
+              flow_id: flowId
+            }
+          ]
+        });
+      }
+
+      if(components.length === 0){
+        components = null;
       }
 
       if(components){
@@ -1507,7 +1554,9 @@ INBOX_HTML = """
       if(!res.ok || data.error){
         throw new Error(data.error || ('HTTP '+res.status));
       }
-      chatText.value = '';
+      if(kind === 'text'){
+        chatText.value = '';
+      }
       showToast('Message sent ✓', false);
       setTimeout(()=>{ loadChat(activePhone); loadContacts(); },400);
     }catch(e){
@@ -1575,6 +1624,8 @@ def inbox_send():
     tpl_lang = request.form.get("tpl_lang") or "en"
     header_type = (request.form.get("header_type") or "").strip().lower()
     header_url = (request.form.get("header_url") or "").strip()
+    flow_id = (request.form.get("flow_id") or "").strip()
+    flow_enable = request.form.get("flow_enable") == "1"
 
     try:
         if kind == "text":
@@ -1592,8 +1643,11 @@ def inbox_send():
                 except Exception:
                     components = None
 
-            if components is None and header_type in ("image", "video") and header_url:
-                components = [
+            if components is None:
+                components = []
+
+            if header_type in ("image", "video") and header_url:
+                components.append(
                     {
                         "type": "header",
                         "parameters": [
@@ -1605,7 +1659,22 @@ def inbox_send():
                             }
                         ]
                     }
-                ]
+                )
+
+            if flow_enable and flow_id:
+                components.append(
+                    {
+                        "type": "button",
+                        "sub_type": "flow",
+                        "index": "0",
+                        "parameters": [
+                            {"type": "flow", "flow_id": flow_id}
+                        ]
+                    }
+                )
+
+            if not components:
+                components = None
 
             tpl = {"name": tpl_name, "language": tpl_lang}
             if components:
@@ -1630,6 +1699,8 @@ def inbox_bulk():
     conc = request.form.get("concurrency")
     header_type = (request.form.get("header_type") or "").strip().lower()
     header_url = (request.form.get("header_url") or "").strip()
+    flow_id = (request.form.get("flow_id") or "").strip()
+    flow_enable = request.form.get("flow_enable") == "1"
 
     try:
         if kind == "text":
@@ -1655,8 +1726,11 @@ def inbox_bulk():
                 except Exception:
                     components = None
 
-            if components is None and header_type in ("image", "video") and header_url:
-                components = [
+            if components is None:
+                components = []
+
+            if header_type in ("image", "video") and header_url:
+                components.append(
                     {
                         "type": "header",
                         "parameters": [
@@ -1668,7 +1742,22 @@ def inbox_bulk():
                             }
                         ]
                     }
-                ]
+                )
+
+            if flow_enable and flow_id:
+                components.append(
+                    {
+                        "type": "button",
+                        "sub_type": "flow",
+                        "index": "0",
+                        "parameters": [
+                            {"type": "flow", "flow_id": flow_id}
+                        ]
+                    }
+                )
+
+            if not components:
+                components = None
 
             tpl = {"name": tpl_name, "language": tpl_lang}
             if components:
