@@ -245,7 +245,7 @@ def build_ack_message(profile_name=None):
         f"Thank you{name_part} for contacting Al-Khawarizmi Group, your request is being processed "
         f"and we will contact you shortly after.\n\n"
         f"{name_part} شكراً\n"
-        f"لتواصلكم مع مجموعة الخوارزمي، جارٍ معالجة طلبكم وسنتواصل معكم قريباً\n"
+        f"لتواصلكم مع مجموعة الخوارizmi، جارٍ معالجة طلبكم وسنتواصل معكم قريباً\n"
     )
 
 def build_ack_message_encoded(profile_name=None):
@@ -703,18 +703,14 @@ def webhook_inbound():
                         body = inbound_text or ""
 
                     elif mtype == "nfm_reply":
-                        # Use robust decoder + preserve original nfm_reply + parsed_response
+                        # Simple + correct Arabic support:
+                        # Decode inner response_json into a normal dict, then store as UTF-8 JSON.
                         nfm = msg.get("nfm_reply") or {}
-                        # Build a minimal flow object and decode it
-                        raw_flow_obj = {
-                            "type": "nfm_reply",
-                            "nfm_reply": nfm
-                        }
-                        parsed, full_obj = _decode_flow_body(json.dumps(raw_flow_obj, ensure_ascii=False))
-
-                        flow_data = full_obj or raw_flow_obj
-                        if parsed:
-                            flow_data["parsed_response"] = parsed
+                        raw_resp = nfm.get("response_json") or "{}"
+                        try:
+                            flow_data = json.loads(raw_resp) if raw_resp else {}
+                        except json.JSONDecodeError:
+                            flow_data = {"raw_response_json": raw_resp}
 
                         print("FLOW SUBMISSION:", json.dumps(flow_data, ensure_ascii=False), flush=True)
                         body = json.dumps(flow_data, ensure_ascii=False)
