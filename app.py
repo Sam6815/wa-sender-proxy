@@ -290,6 +290,32 @@ def build_flow_preview(body):
     else:
         return f"FLOW: {status}"
 
+def _deep_decode_unicode_escapes(obj):
+    """
+    Recursively walk dicts/lists/strings and turn '\\u0627...' style
+    sequences into real Unicode characters (Arabic, etc.).
+
+    We only try decoding when the string actually contains '\\u'.
+    """
+    if isinstance(obj, str):
+        if "\\u" in obj:
+            try:
+                # This turns literal backslash-u sequences into real characters
+                return obj.encode("utf-8").decode("unicode_escape")
+            except Exception:
+                return obj
+        return obj
+
+    if isinstance(obj, dict):
+        return {k: _deep_decode_unicode_escapes(v) for k, v in obj.items()}
+
+    if isinstance(obj, list):
+        return [_deep_decode_unicode_escapes(v) for v in obj]
+
+    return obj
+
+
+
 # newly added to decode the utf-8 unicode to change unicode to arabic
 def _decode_flow_body(raw_body):
     """
@@ -301,6 +327,8 @@ def _decode_flow_body(raw_body):
       - {"type":"nfm_reply","nfm_reply":{"response_json":"{...}"}}
       - {"response_json":"{...}"}
       - double-encoded JSON strings.
+    Also runs _deep_decode_unicode_escapes() to turn any inner '\\uXXXX'
+    sequences into real Unicode characters (e.g. Arabic).
     """
     if raw_body is None:
         return None, None
@@ -329,6 +357,9 @@ def _decode_flow_body(raw_body):
     # 3) New format: parsed_response already present
     parsed = obj.get("parsed_response")
     if isinstance(parsed, dict):
+        # Normalize any \\uXXXX sequences to real characters
+        parsed = _deep_decode_unicode_escapes(parsed)
+        obj = _deep_decode_unicode_escapes(obj)
         return parsed, obj
 
     # 4) Look for response_json in various places
@@ -350,7 +381,12 @@ def _decode_flow_body(raw_body):
     else:
         parsed = {}
 
+    # FINAL: deep-decode any '\\uXXXX' sequences
+    parsed = _deep_decode_unicode_escapes(parsed)
+    obj = _deep_decode_unicode_escapes(obj)
+
     return parsed, obj
+
 
 def _massage_messages(rows, base_url):
     out = []
