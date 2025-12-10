@@ -191,7 +191,6 @@ def graph_post(path, payload):
     if not WA_PNID or not WA_TOKEN:
         raise RuntimeError("WA_PNID/WA_TOKEN not configured.")
 
-    # Safety net for template.components if ALLOW_TEMPLATE_COMPONENTS is off
     if isinstance(payload, dict) and not ALLOW_TEMPLATE_COMPONENTS:
         try:
             if payload.get("type") == "template":
@@ -252,35 +251,25 @@ def build_ack_message_encoded(profile_name=None):
     return urllib.parse.quote(build_ack_message(profile_name))
 
 
-# ---------- FLOW PREVIEW HELPER (FULL, NO TRUNCATION) ----------
+# ---------- (legacy) FLOW PREVIEW HELPER (kept for reference, not used) ----------
 def build_flow_preview(body):
     """
-    Build a FULL, readable preview for any Flow (nfm_reply) payload.
-
-    We try to show the decoded parsed_response (Arabic included) as
-    pretty JSON. If we cannot, we fall back to pretty-printing the
-    entire object. No 'FLOW: Sent –' prefix, no truncation.
+    Legacy helper – no longer used for UI, kept only as a helper if needed.
     """
     if body is None:
         return None
-
-    # Normalize to dict
     if isinstance(body, str):
         try:
             obj = json.loads(body)
         except Exception:
-            # Could be a raw response_json string; just return as-is
-            return body
+            return None
     elif isinstance(body, dict):
         obj = body
     else:
-        return str(body)
+        return None
 
-    # nfm_reply block if present
     nfm = obj.get("nfm_reply") or obj
     parsed = obj.get("parsed_response")
-
-    # If parsed_response missing, decode response_json if available
     if not parsed:
         rj = nfm.get("response_json")
         if isinstance(rj, str):
@@ -291,15 +280,14 @@ def build_flow_preview(body):
         elif isinstance(rj, dict):
             parsed = rj
 
-    # Prefer parsed_response if it is a dict and non-empty
-    if isinstance(parsed, dict) and parsed:
-        return json.dumps(parsed, ensure_ascii=False, indent=2)
-
-    # Fallback: pretty-print whole object
-    try:
-        return json.dumps(obj, ensure_ascii=False, indent=2)
-    except Exception:
-        return str(obj)
+    status = (nfm.get("body") or nfm.get("name") or "Flow reply").strip()
+    if isinstance(parsed, dict):
+        short_txt = json.dumps(parsed, ensure_ascii=False)
+        if len(short_txt) > 200:
+            short_txt = short_txt[:200] + "…"
+        return f"FLOW: {status} – {short_txt}"
+    else:
+        return f"FLOW: {status}"
 
 
 def _massage_messages(rows, base_url):
@@ -320,16 +308,15 @@ def _massage_messages(rows, base_url):
         raw_body = m.get("body")
         t = (m.get("type") or "").lower()
 
-        # FLOW messages: show full submission (decoded Arabic JSON)
-        flow_preview = None
-        try:
-            if t == "nfm_reply" or (isinstance(raw_body, str) and '"nfm_reply"' in raw_body):
-                flow_preview = build_flow_preview(raw_body)
-        except Exception:
-            flow_preview = None
-
-        if flow_preview:
-            m["preview"] = flow_preview
+        # FULL FLOW VIEW: show complete parsed_response as pretty JSON
+        if t == "nfm_reply":
+            try:
+                obj = json.loads(raw_body) if isinstance(raw_body, str) else (raw_body or {})
+                parsed = obj.get("parsed_response") or obj.get("nfm_reply") or {}
+                m["preview"] = json.dumps(parsed, ensure_ascii=False, indent=2)
+            except Exception:
+                # fallback: leave raw body
+                pass
 
         # Media messages
         elif t in {"image","audio","video","document","sticker"} and raw_body:
@@ -379,6 +366,9 @@ def do_send(to, kind="text", text="", template=None):
         if not name:
             raise RuntimeError("template.name required")
 
+        # Custom flow mode flag from UI/API
+        flow_mode = tpl.pop("flow_mode", None)
+
         lang_code = _lang_code_from(tpl.get("language"))
         lang_value = tpl.get("language")
 
@@ -392,6 +382,30 @@ def do_send(to, kind="text", text="", template=None):
             lang_value = {"code": c}
         else:
             lang_value = {"code": lang_code}
+
+        # If Flow mode requested and no components defined, inject Flow button
+        components = tpl.get("components")
+        if flow_mode == "flow_button" and not components:
+            if not ALLOW_TEMPLATE_COMPONENTS:
+                raise RuntimeError(
+                    "Flow templates require WA_ALLOW_TEMPLATE_COMPONENTS=1 (to allow components)."
+                )
+            components = [
+                {
+                    "type": "button",
+                    "sub_type": "flow",
+                    "index": "0",
+                    "parameters": [
+                        {
+                            "type": "action",
+                            "action": {
+                                "flow_token": "unused"
+                            }
+                        }
+                    ]
+                }
+            ]
+            tpl["components"] = components
 
         if ALLOW_TEMPLATE_COMPONENTS:
             t = dict(tpl)
@@ -964,7 +978,7 @@ INBOX_HTML = """
    color:#111827;
  }
  .msg{
-   max-width:min(70%, 640px);
+   max-width:min(60%, 520px);
    width:fit-content;
    padding:6px 8px;
    border-radius:10px;
@@ -1187,10 +1201,13 @@ INBOX_HTML = """
               <option value="template">Template</option>
             </select>
             <input id="tplName" placeholder="template name (if template)">
-            <!-- EN/AR dropdown for template language -->
-            <select id="tplLang" style="max-width:80px">
+            <select id="tplLang">
               <option value="en" selected>EN</option>
               <option value="ar">AR</option>
+            </select>
+            <select id="tplMode">
+              <option value="normal" selected>Mode: Normal</option>
+              <option value="flow">Mode: Flow button</option>
             </select>
             <select id="headerType">
               <option value="">Header: none</option>
@@ -1200,10 +1217,9 @@ INBOX_HTML = """
             <input id="headerUrl" placeholder="https:// header media URL" style="flex:1;min-width:120px">
           </div>
           <textarea id="chatText" class="chat-textarea"
-            placeholder="Type a message (for text) OR JSON components for advanced templates. For Flow CTA templates, leave this empty."></textarea>
+            placeholder="Type a message (for text) OR JSON components for advanced templates. Leave empty for normal / flow mode."></textarea>
           <div class="small">
-            For templates: you can paste components JSON or just choose a header type + URL above for media headers.
-            For Flow CTA templates created in WhatsApp Manager, usually you do NOT need any components here.
+            For Flow templates: just choose Mode = Flow button, no need to paste JSON.
           </div>
           <button type="submit" class="send-btn">Send</button>
         </form>
@@ -1228,10 +1244,14 @@ INBOX_HTML = """
                 <label class="small">Template name</label>
                 <input name="tpl_name" placeholder="hello_world1">
                 <label class="small">Language</label>
-                <!-- EN/AR dropdown for bulk template language -->
                 <select name="tpl_lang">
                   <option value="en" selected>EN</option>
                   <option value="ar">AR</option>
+                </select>
+                <label class="small">Template mode</label>
+                <select name="tpl_mode">
+                  <option value="normal" selected>Normal</option>
+                  <option value="flow">Flow button</option>
                 </select>
                 <label class="small">Header type</label>
                 <select name="header_type">
@@ -1248,7 +1268,7 @@ INBOX_HTML = """
               </div>
             </div>
             <textarea name="payload"
-              placeholder='For templates: optional JSON components body. For text: message body. For Flow CTA templates, normally leave this empty.'></textarea>
+              placeholder='For templates: optional JSON components body. Usually leave empty for Normal/Flow. For text: message body.'></textarea>
             <button type="submit">Send Bulk</button>
             <div class="small">Note: Marketing/out-of-session must use approved templates.</div>
           </form>
@@ -1276,6 +1296,7 @@ INBOX_HTML = """
   const chatKind = document.getElementById('chatKind');
   const tplName = document.getElementById('tplName');
   const tplLang = document.getElementById('tplLang');
+  const tplMode = document.getElementById('tplMode');
   const headerType = document.getElementById('headerType');
   const headerUrl = document.getElementById('headerUrl');
   const chatText = document.getElementById('chatText');
@@ -1453,7 +1474,8 @@ INBOX_HTML = """
     const kind = chatKind.value || 'text';
     const text = (chatText.value || '').trim();
     const name = tplName.value.trim();
-    const lang = tplLang.value.trim() || 'en';
+    const lang = tplLang.value || 'en';
+    const mode = tplMode.value || 'normal';
     const hType = (headerType.value || '').trim().toLowerCase();
     const hUrl = (headerUrl.value || '').trim();
 
@@ -1471,6 +1493,10 @@ INBOX_HTML = """
         return;
       }
       let template = { name: name, language: lang };
+      if(mode === 'flow'){
+        template.flow_mode = 'flow_button';
+      }
+
       let components = null;
 
       if(text){
@@ -1482,11 +1508,10 @@ INBOX_HTML = """
             components = [parsed];
           }
         }catch(e){
-          // ignore parse error – fall back to header only
         }
       }
 
-      if(!components && hType && hUrl){
+      if(!components && hType && hUrl && hType !== 'flow'){
         components = [
           {
             type:'header',
@@ -1529,9 +1554,9 @@ INBOX_HTML = """
   function applyTheme(theme){
     document.documentElement.setAttribute('data-theme', theme);
     if(theme === 'light'){
-      themeToggleBtn.textContent = ' Light';
+      themeToggleBtn.textContent = '☀️ Light';
     }else{
-      themeToggleBtn.textContent = ' Dark';
+      themeToggleBtn.textContent = '🌙 Dark';
     }
   }
   const savedTheme = localStorage.getItem('waTheme') || 'dark';
@@ -1582,6 +1607,7 @@ def inbox_send():
     raw_text = (request.form.get("text") or "").strip()
     tpl_name = request.form.get("tpl_name") or ""
     tpl_lang = request.form.get("tpl_lang") or "en"
+    tpl_mode = request.form.get("tpl_mode") or "normal"
     header_type = (request.form.get("header_type") or "").strip().lower()
     header_url = (request.form.get("header_url") or "").strip()
 
@@ -1617,6 +1643,8 @@ def inbox_send():
                 ]
 
             tpl = {"name": tpl_name, "language": tpl_lang}
+            if tpl_mode == "flow":
+                tpl["flow_mode"] = "flow_button"
             if components:
                 tpl["components"] = components
 
@@ -1635,6 +1663,7 @@ def inbox_bulk():
     kind = request.form.get("kind","template")
     tpl_name = request.form.get("tpl_name") or ""
     tpl_lang = request.form.get("tpl_lang") or "en"
+    tpl_mode = request.form.get("tpl_mode") or "normal"
     sleep = request.form.get("sleep")
     conc = request.form.get("concurrency")
     header_type = (request.form.get("header_type") or "").strip().lower()
@@ -1680,6 +1709,8 @@ def inbox_bulk():
                 ]
 
             tpl = {"name": tpl_name, "language": tpl_lang}
+            if tpl_mode == "flow":
+                tpl["flow_mode"] = "flow_button"
             if components:
                 tpl["components"] = components
 
@@ -1706,7 +1737,7 @@ def bulk_api():
       "to": ["+9617xxxxxx", "+9613yyyyyy"],
       "kind": "template",
       "text": "Hi",                               # when kind=text
-      "template": {"name":"hello_world1","language":"en","components":[...]},
+      "template": {"name":"hello_world1","language":"en","components":[...], "flow_mode":"flow_button"},
       "concurrency": 5,
       "per_call_sleep": 0.1
     }
@@ -1795,7 +1826,11 @@ def send_api():
     JSON body:
       { "to": "9617xxxxxx", "kind": "text", "text": "hi" }
       or
-      { "to": "9617xxxxxx", "kind": "template", "template": { "name":"xyz", "language":"en", ... } }
+      {
+        "to": "9617xxxxxx",
+        "kind": "template",
+        "template": { "name":"xyz", "language":"en", "flow_mode":"flow_button", ... }
+      }
     """
     p = request.get_json(force=True, silent=False)
     to = p.get("to")
