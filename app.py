@@ -393,11 +393,29 @@ def _decode_flow_body(raw_body):
 
     return parsed, obj
 
+def attach_latest_status(rows):
+    """
+    Merge status events into outgoing messages:
+    If we have direction='status' rows with same wa_id, apply the latest status to the 'out' message.
+    """
+    status_map = {}
+    for r in rows:
+        if (r.get("direction") == "status") and r.get("wa_id"):
+            status_map[r["wa_id"]] = (r.get("status") or "").lower()
+
+    for r in rows:
+        if (r.get("direction") == "out") and r.get("wa_id"):
+            r["status"] = status_map.get(r["wa_id"], r.get("status"))
+
+    return rows
 
 
 def _massage_messages(rows, base_url):
+    rows = attach_latest_status(rows)
+
     out = []
     base = (base_url or "").rstrip("/")
+
 
     for m in rows:
         m = dict(m)
@@ -1100,6 +1118,10 @@ INBOX_HTML = """
    background:var(--wa-light);
    color:#111827;
  }
+ .msg.out.read{
+   background: var(--blue);
+   color: #ffffff;
+ }
  .msg{
   max-width: 100%;
   width: fit-content;
@@ -1601,7 +1623,13 @@ INBOX_HTML = """
 
         const bubble = document.createElement('div');
         const dir = m.direction === 'out' ? 'out' : 'in';
-        bubble.className = 'msg ' + dir;
+
+        let cls = 'msg ' + dir;
+        if (dir === 'out' && (m.status || '').toLowerCase() === 'read') {
+        cls += ' read';
+        }
+        bubble.className = cls;
+
 
         if(m.media_link){
           const mediaDiv = document.createElement('div');
