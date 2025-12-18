@@ -66,13 +66,12 @@ def get_conn():
             return conn
         except Exception as e:
             print("⚠️ Postgres connection failed:", e, flush=True)
-            #raise
+            # raise
     conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA synchronous=NORMAL;")
     return conn
-
 
 
 def init_db():
@@ -165,7 +164,7 @@ try:
     print(f"DB backend: {'Postgres' if DATABASE_URL else 'SQLite'}", flush=True)
 except Exception as e:
     print("❌ init_db failed:", e, flush=True)
-    #raise
+    # raise
 
 # -------- Minimal HTTP Basic auth --------
 def _unauth():
@@ -255,6 +254,46 @@ def build_ack_message(profile_name=None):
 
 def build_ack_message_encoded(profile_name=None):
     return urllib.parse.quote(build_ack_message(profile_name))
+
+
+# ---------- Outgoing preview helper (FIX: show real text, not JSON) ----------
+def _preview_from_outgoing_payload(body_text: str) -> str:
+    """
+    Outgoing messages are stored as full Graph payload JSON in messages.body.
+    Convert that JSON into a clean human preview for sidebar + chat bubble.
+    """
+    if not body_text:
+        return ""
+    if not isinstance(body_text, str):
+        return str(body_text)
+
+    s = body_text.strip()
+    if not (s.startswith("{") and s.endswith("}")):
+        return body_text  # already plain text
+
+    try:
+        obj = json.loads(s)
+    except Exception:
+        return body_text
+
+    # Outgoing TEXT
+    if isinstance(obj, dict) and obj.get("type") == "text":
+        txt = (obj.get("text") or {}).get("body")
+        if txt:
+            return txt
+
+    # Outgoing TEMPLATE
+    if isinstance(obj, dict) and obj.get("type") == "template":
+        tpl = obj.get("template") or {}
+        name = tpl.get("name") or "template"
+        lang = tpl.get("language")
+        if isinstance(lang, dict):
+            lang = lang.get("code") or ""
+        if lang:
+            return f"📌 Template: {name} ({lang})"
+        return f"📌 Template: {name}"
+
+    return body_text
 
 
 # ---------- (legacy) FLOW PREVIEW HELPER (kept for reference, not used) ----------
@@ -413,18 +452,21 @@ def attach_latest_status(rows):
     return rows
 
 
-
 def _massage_messages(rows, base_url):
     rows = attach_latest_status(rows)
 
     out = []
     base = (base_url or "").rstrip("/")
 
-
     for m in rows:
         m = dict(m)
         m["created_fmt"] = fmt_gmt2(m.get("created_at", ""))
-        m["preview"] = m.get("body") or ""
+
+        raw_body = m.get("body")
+        t = (m.get("type") or "").lower()
+
+        # Default preview = body (will be overridden below where needed)
+        m["preview"] = raw_body or ""
         m["media_link"] = None
         m["status_class"] = badge_class(m.get("status"))
 
@@ -433,8 +475,9 @@ def _massage_messages(rows, base_url):
         m["ack_msg"] = ack_msg
         m["ack_msg_enc"] = build_ack_message_encoded(profile_name)
 
-        raw_body = m.get("body")
-        t = (m.get("type") or "").lower()
+        # ---------- FIX: outgoing “preview” should show real text (not JSON payload) ----------
+        if (m.get("direction") == "out") and (m.get("type") in ("text", "template")):
+            m["preview"] = _preview_from_outgoing_payload(raw_body) or (raw_body or "")
 
         # ---------- FLOW MESSAGES: decode all shapes & show pretty Arabic ----------
         if t == "nfm_reply":
@@ -788,15 +831,24 @@ def api_contacts():
             continue
 
         existing = contacts_map.get(phone)
+
+        # FIX: prefer newest message for preview/time, but DO NOT lose existing profile name
         if (not existing) or (m["id"] > existing["last_id"]):
+            keep_name = (existing.get("name") if existing else "") or ""
+            new_name = (m.get("name") or "").strip() or keep_name
+
             contacts_map[phone] = {
                 "phone": phone,
-                "name": m.get("name") or "",
+                "name": new_name,
                 "last_preview": m.get("preview") or "",
                 "last_time": m.get("created_fmt") or m.get("created_at") or "",
                 "last_id": m["id"],
                 "last_direction": direction,
             }
+        else:
+            # If we already have this contact but name is empty and this row has a name, fill it
+            if existing and (not (existing.get("name") or "").strip()) and (m.get("name") or "").strip():
+                existing["name"] = (m.get("name") or "").strip()
 
     contacts = list(contacts_map.values())
     contacts.sort(key=lambda c: c["last_id"], reverse=True)
