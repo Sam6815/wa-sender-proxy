@@ -43,8 +43,8 @@ BULK_SLEEP_DEFAULT = float(os.getenv("BULK_PER_CALL_SLEEP", "0.1"))  # 0.1s
 BULK_MAX_RETRIES = int(os.getenv("BULK_MAX_RETRIES", "2"))
 
 APP_DIR = Path(__file__).resolve().parent
-DATA_DIR = APP_DIR / "data"; DATA_DIR.mkdir(exist_ok=True)
-DB_PATH  = DATA_DIR / "messages.db"
+SQLITE_DB_PATH = os.getenv("SQLITE_DB_PATH", "/tmp/messages.db")
+DB_PATH = Path(SQLITE_DB_PATH)
 STATIC_DIR = APP_DIR / "static"; STATIC_DIR.mkdir(exist_ok=True)
 
 # -------- App --------
@@ -66,8 +66,13 @@ def get_conn():
             return conn
         except Exception as e:
             print("⚠️ Postgres connection failed:", e, flush=True)
-            raise
-    return sqlite3.connect(DB_PATH)
+            #raise
+    conn = sqlite3.connect(DB_PATH, timeout=30, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA journal_mode=WAL;")
+    conn.execute("PRAGMA synchronous=NORMAL;")
+    return conn
+
 
 
 def init_db():
@@ -160,7 +165,7 @@ try:
     print(f"DB backend: {'Postgres' if DATABASE_URL else 'SQLite'}", flush=True)
 except Exception as e:
     print("❌ init_db failed:", e, flush=True)
-    raise
+    #raise
 
 # -------- Minimal HTTP Basic auth --------
 def _unauth():
