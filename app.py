@@ -396,18 +396,22 @@ def _decode_flow_body(raw_body):
 def attach_latest_status(rows):
     """
     Merge status events into outgoing messages:
-    If we have direction='status' rows with same wa_id, apply the latest status to the 'out' message.
+    We fetch rows ORDER BY id DESC (newest first), so the FIRST status we see for a wa_id is the latest.
+    Do NOT overwrite it with older statuses later in the loop.
     """
     status_map = {}
     for r in rows:
         if (r.get("direction") == "status") and r.get("wa_id"):
-            status_map[r["wa_id"]] = (r.get("status") or "").lower()
+            wid = r["wa_id"]
+            if wid not in status_map:  # keep newest only
+                status_map[wid] = (r.get("status") or "").lower()
 
     for r in rows:
         if (r.get("direction") == "out") and r.get("wa_id"):
             r["status"] = status_map.get(r["wa_id"], r.get("status"))
 
     return rows
+
 
 
 def _massage_messages(rows, base_url):
