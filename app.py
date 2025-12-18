@@ -776,7 +776,7 @@ def webhook_inbound():
 @require_basic_auth
 def api_contacts():
     base = request.url_root
-    rows = _massage_messages(fetch_messages(500, direction=None), base)
+    rows = _massage_messages(fetch_messages(2000, direction=None), base)
 
     contacts_map = {}
     for m in rows:
@@ -811,7 +811,7 @@ def api_chat():
         return jsonify([])
 
     base = request.url_root
-    rows = _massage_messages(fetch_messages(500, direction=None), base)
+    rows = _massage_messages(fetch_messages(2000, direction=None), base)
 
     msgs = []
     for m in rows:
